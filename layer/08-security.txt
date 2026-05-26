@@ -1,0 +1,684 @@
+2:I[23809,["7059","static/chunks/7059-c1bf82d70a6e6fbe.js","7138","static/chunks/7138-e98f253141f957aa.js","9439","static/chunks/9439-70d869865e3180b8.js","4790","static/chunks/app/layer/%5Bid%5D/page-98a87148de46faea.js"],"default"]
+4:I[39275,[],""]
+6:I[61343,[],""]
+7:I[57163,["3185","static/chunks/app/layout-c561721c95941620.js"],"default"]
+3:T596f,# Layer 8: Security & Row-Level Security
+## Defense in Depth Across Every Layer
+
+> **Layer role:** Security is not one layer — it's a philosophy applied to every layer. This chapter covers the attack vectors that compromise real production systems, the defenses that stop them, and the mindset shift from "add security later" to "design secure systems from the start."
+
+---
+
+## Table of Contents
+
+1. [Beginner Explanation](#beginner-explanation)
+2. [The OWASP Top 10](#the-owasp-top-10)
+3. [SQL Injection](#sql-injection)
+4. [Cross-Site Scripting (XSS)](#cross-site-scripting-xss)
+5. [CSRF (Cross-Site Request Forgery)](#csrf-cross-site-request-forgery)
+6. [Transport Security (HTTPS/TLS)](#transport-security-httpstls)
+7. [Secrets Management](#secrets-management)
+8. [Zero Trust Security Model](#zero-trust-security-model)
+9. [Row-Level Security (RLS)](#row-level-security-rls)
+10. [Dependency Security](#dependency-security)
+11. [Security Headers](#security-headers)
+12. [Architecture Diagram](#architecture-diagram)
+13. [Common Mistakes](#common-mistakes)
+14. [Best Practices](#best-practices)
+15. [Interview-Level Insights](#interview-level-insights)
+16. [Summary](#summary)
+17. [Production Checklist](#production-checklist)
+
+---
+
+## Beginner Explanation
+
+Security is like the defense layers of a medieval castle. The outer wall (firewall, HTTPS) stops most attacks. The moat (network security groups) makes breaching harder. The inner keep (application security) is the last line. Guards at each gate (auth middleware) verify identity. The vault (encrypted database) protects the crown jewels even if someone gets inside.
+
+A single breach in any layer and an attacker can steal user data, destroy records, or take control of your systems. Security is not about being paranoid — it's about being systematic.
+
+---
+
+## The OWASP Top 10
+
+The OWASP Top 10 is the definitive list of the most critical web application security risks, updated every 3-4 years based on real-world breach data.
+
+| Rank | Risk | Frequency | Impact |
+|------|------|-----------|--------|
+| A01 | Broken Access Control | Very High | Data breach, privilege escalation |
+| A02 | Cryptographic Failures | High | Data exposure, PII breach |
+| A03 | Injection (SQL, NoSQL, OS) | High | Data theft, data destruction |
+| A04 | Insecure Design | Medium | Architectural vulnerabilities |
+| A05 | Security Misconfiguration | Very High | Exposed admin panels, default creds |
+| A06 | Vulnerable Components | High | Supply chain attacks |
+| A07 | Authentication Failures | High | Account takeover |
+| A08 | Integrity Failures | Medium | Code injection, CI/CD compromise |
+| A09 | Logging/Monitoring Failures | Medium | Undetected breaches |
+| A10 | SSRF | Medium | Internal network access |
+
+---
+
+## SQL Injection
+
+The most classic and still most common critical vulnerability. An attacker injects malicious SQL into your queries.
+
+### The Attack
+
+```javascript
+// Vulnerable code — user input directly in SQL
+const email = req.body.email  // Attacker sends: ' OR '1'='1
+const query = `SELECT * FROM users WHERE email = '${email}'`
+// Becomes: SELECT * FROM users WHERE email = '' OR '1'='1'
+// Returns EVERY user in the database!
+
+// Worse:
+// email = "'; DROP TABLE users; --"
+// SELECT * FROM users WHERE email = ''; DROP TABLE users; --'
+// Destroys your entire users table!
+
+// Even worse for data exfiltration:
+// email = "' UNION SELECT username, password, null FROM admin_users --"
+// Returns admin credentials in the response!
+```
+
+### The Defense: Parameterized Queries
+
+```typescript
+// ❌ String interpolation — NEVER do this
+const users = await db.query(`SELECT * FROM users WHERE email = '${email}'`)
+
+// ✅ Parameterized queries — SQL and data are always separate
+// The DB driver handles escaping, SQL structure cannot change
+const users = await db.query(
+  'SELECT * FROM users WHERE email = $1',
+  [email]  // $1 is a placeholder, data is passed separately
+)
+
+// ✅ With Prisma ORM — automatically parameterized
+const user = await prisma.user.findUnique({
+  where: { email }  // Never raw string interpolation
+})
+
+// ✅ With Knex query builder — automatically parameterized
+const users = await db('users')
+  .where({ email })  // Safe
+  .select('id', 'email', 'name')  // Column whitelist
+```
+
+### Stored Procedures Don't Help if Used Wrong
+
+```sql
+-- ❌ Dynamic SQL in stored procedure — still vulnerable
+CREATE PROCEDURE get_user(IN email VARCHAR)
+BEGIN
+  SET @sql = CONCAT('SELECT * FROM users WHERE email = "', email, '"');
+  PREPARE stmt FROM @sql;
+  EXECUTE stmt;
+END;
+
+-- ✅ Parameterized stored procedure
+CREATE PROCEDURE get_user(IN p_email VARCHAR)
+BEGIN
+  SELECT * FROM users WHERE email = p_email;  -- Direct parameter use
+END;
+```
+
+---
+
+## Cross-Site Scripting (XSS)
+
+XSS allows attackers to inject malicious JavaScript into pages that other users visit.
+
+### Types of XSS
+
+```
+Reflected XSS:
+  Attacker sends: https://bank.com/search?q=<script>steal(document.cookie)</script>
+  Server reflects the query in the page
+  Victim's browser executes the script
+  → Session cookie stolen
+
+Stored XSS:
+  Attacker posts: "Hi! Check this out: <script>steal(document.cookie)</script>"
+  Server stores it in the database
+  Every user who sees the post runs the script
+  → All viewer sessions stolen
+
+DOM-based XSS:
+  No server involvement — client-side JS writes attacker-controlled input to DOM
+  document.getElementById('output').innerHTML = location.hash  // Vulnerable
+```
+
+### Defense
+
+```typescript
+// ❌ Raw HTML injection — any user input becomes executable script
+element.innerHTML = userContent  // VULNERABLE
+document.write(userContent)      // VULNERABLE
+
+// ✅ Text content — React does this automatically for JSX
+element.textContent = userContent  // Safe — displayed as text, not HTML
+<div>{userContent}</div>           // Safe in React/Vue/Angular
+
+// ✅ When you MUST render HTML (e.g., rich text editor):
+import DOMPurify from 'dompurify'
+
+const sanitized = DOMPurify.sanitize(userContent, {
+  ALLOWED_TAGS: ['p', 'b', 'i', 'em', 'strong', 'a', 'ul', 'ol', 'li'],
+  ALLOWED_ATTR: ['href', 'target'],
+  FORBID_ATTR: ['style', 'onerror', 'onload'],  // Block inline handlers
+  ALLOW_DATA_ATTR: false,
+})
+element.innerHTML = sanitized
+
+// ✅ Content Security Policy — defense in depth
+// Even if XSS succeeds, CSP prevents exfiltration
+res.setHeader('Content-Security-Policy',
+  "default-src 'self'; " +
+  "script-src 'self' 'nonce-${nonce}'; " +  // Only scripts with nonce
+  "connect-src 'self' https://api.example.com; " +
+  "img-src 'self' https://cdn.example.com data:; " +
+  "frame-ancestors 'none';"
+)
+```
+
+---
+
+## CSRF (Cross-Site Request Forgery)
+
+CSRF tricks a logged-in user's browser into making an unintended request to your server.
+
+### The Attack
+
+```
+1. User logs into bank.com → has session cookie
+2. User visits evil.com while still logged in
+3. evil.com contains hidden form:
+   <img src="https://bank.com/transfer?to=attacker&amount=10000">
+4. User's browser automatically includes bank.com's session cookie
+5. Transfer executes without user's knowledge!
+```
+
+### Defense
+
+```typescript
+// ❌ No CSRF protection — any site can trigger state changes
+app.post('/transfer', async (req, res) => {
+  // Uses session cookie automatically included by browser
+  await transfer(req.session.userId, req.body.to, req.body.amount)
+})
+
+// ✅ CSRF token (synchronizer token pattern)
+import csrf from 'csurf'
+
+// Middleware: generates token on GET, validates on POST/PUT/DELETE
+app.use(csrf({ cookie: { httpOnly: true, secure: true } }))
+
+app.get('/transfer-form', (req, res) => {
+  // Send CSRF token to client with the form
+  res.render('transfer', { csrfToken: req.csrfToken() })
+})
+
+app.post('/transfer', (req, res) => {
+  // CSRF middleware validates req.body._csrf === session CSRF token
+  // Cross-origin requests cannot access the token → fail
+  transfer(req.session.userId, req.body.to, req.body.amount)
+})
+
+// ✅ SameSite cookie attribute (simpler, modern browsers)
+// SameSite=Strict: cookie NOT sent on cross-site requests
+// SameSite=Lax: cookie sent for top-level navigation only
+res.cookie('session', token, {
+  httpOnly: true,
+  secure: true,
+  sameSite: 'strict',  // Prevents CSRF without separate token
+})
+
+// ✅ For APIs with JWTs (not cookies):
+// CSRF is not an issue — browsers don't auto-include Authorization header
+// Custom headers cannot be set cross-origin without CORS preflight
+```
+
+---
+
+## Transport Security (HTTPS/TLS)
+
+All traffic between users and your servers must be encrypted. Unencrypted HTTP is unacceptable in production.
+
+```
+Without HTTPS:
+  User → [plaintext] → Attacker in middle → [plaintext] → Your server
+  Attacker reads passwords, tokens, PII
+  Attacker modifies responses (injects scripts!)
+  Coffee shop WiFi is a perfect MITM attack location
+
+With HTTPS (TLS):
+  User → [encrypted] → Attacker in middle → [can't read/modify] → Your server
+  TLS certificate proves your server's identity (prevents impersonation)
+  Data encrypted with session key (forward secrecy)
+```
+
+```nginx
+# Nginx HTTPS configuration
+server {
+    listen 443 ssl http2;
+    server_name example.com www.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/example.com/privkey.pem;
+
+    # Modern TLS configuration (disable old vulnerable versions)
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:...;
+    ssl_prefer_server_ciphers off;
+
+    # HSTS — tell browsers to ALWAYS use HTTPS for this domain
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+
+    # Other security headers
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+}
+
+# Redirect all HTTP to HTTPS
+server {
+    listen 80;
+    return 301 https://$host$request_uri;
+}
+```
+
+---
+
+## Secrets Management
+
+Secrets (API keys, database passwords, JWT secrets) must never appear in source code.
+
+```mermaid
+flowchart LR
+    subgraph BAD["❌ Common Mistakes"]
+        CODE[In source code\n.env committed]
+        ENV[Hardcoded strings\nconst KEY='abc123']
+        LOGS[Logged to console\nconsole.log secret]
+    end
+
+    subgraph GOOD["✅ Production Approach"]
+        AWS_SM[AWS Secrets Manager\nVersioned, audited, rotatable]
+        VAULT[HashiCorp Vault\nDynamic secrets, fine-grained access]
+        K8S_SECRET[Kubernetes Secrets\nEncrypted at rest + RBAC]
+        GH_SECRET[GitHub Actions Secrets\nCI/CD only, never in logs]
+    end
+
+    style BAD fill:#fee2e2
+    style GOOD fill:#dcfce7
+```
+
+```typescript
+// ❌ Secrets in environment variables (from .env committed to git)
+const stripe = new Stripe(process.env.STRIPE_KEY!)  // Where did STRIPE_KEY come from?
+
+// ✅ Fetch secrets from AWS Secrets Manager at startup
+import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager'
+
+const secretsClient = new SecretsManagerClient({ region: 'us-east-1' })
+
+async function getSecrets(): Promise<AppSecrets> {
+  const response = await secretsClient.send(new GetSecretValueCommand({
+    SecretId: 'production/myapp/api-keys',
+  }))
+  return JSON.parse(response.SecretString!)
+}
+
+// Rotate secrets automatically — AWS rotates every 90 days
+// Application fetches fresh secret on each startup (or caches with TTL)
+```
+
+```yaml
+# ✅ Kubernetes Secrets with External Secrets Operator
+# Syncs from AWS Secrets Manager into Kubernetes Secrets
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: api-secrets
+spec:
+  refreshInterval: 1h  # Re-sync every hour (picks up rotations)
+  secretStoreRef:
+    name: aws-secrets-manager
+    kind: SecretStore
+  target:
+    name: api-secrets  # Creates a Kubernetes Secret with this name
+  data:
+    - secretKey: DATABASE_URL        # K8s Secret key
+      remoteRef:
+        key: production/myapp       # AWS Secrets Manager path
+        property: database_url      # JSON property
+    - secretKey: JWT_SECRET
+      remoteRef:
+        key: production/myapp
+        property: jwt_secret
+```
+
+---
+
+## Zero Trust Security Model
+
+Traditional security assumes everything inside the network perimeter is trusted. Zero Trust assumes everything is hostile — verify every request regardless of source.
+
+```
+Traditional "Castle and Moat" Model:
+  External: Untrusted
+  Internal network: Trusted ← WRONG — once attacker is inside, free movement
+
+Zero Trust Model:
+  Every request, from anywhere, must be authenticated and authorized
+  No implicit trust based on network location
+  "Verify explicitly, use least privilege, assume breach"
+```
+
+**Zero Trust in practice:**
+
+```typescript
+// Every service-to-service call requires authentication
+// Even internal microservices cannot call each other without a valid token
+
+// Service A calls Service B (internal network)
+const response = await fetch('http://user-service.internal/users/123', {
+  headers: {
+    // Service A's own JWT (signed with Service A's key)
+    'Authorization': `Bearer ${serviceAToken}`,
+    // Forward the user's original token for authorization decisions
+    'X-User-Token': userToken,
+  }
+})
+
+// Service B validates:
+// 1. Is the calling service authorized to call this endpoint? (service-to-service auth)
+// 2. Does the user have permission? (user authorization)
+```
+
+---
+
+## Row-Level Security (RLS)
+
+RLS moves authorization enforcement into the database layer — even if application code is buggy, the database enforces data access policies.
+
+```sql
+-- Social media app: users can only see their own posts or public posts
+
+-- Enable RLS (disabled by default)
+ALTER TABLE posts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE posts FORCE ROW LEVEL SECURITY;  -- Even the table owner is restricted
+
+-- Policy: what a user can SELECT
+CREATE POLICY posts_read_policy ON posts
+  FOR SELECT
+  TO app_role  -- Only applies to app_role DB user
+  USING (
+    author_id = current_setting('app.user_id')::uuid
+    OR visibility = 'public'
+    OR (visibility = 'followers' AND EXISTS (
+      SELECT 1 FROM follows
+      WHERE follower_id = current_setting('app.user_id')::uuid
+        AND followee_id = posts.author_id
+    ))
+  );
+
+-- Policy: what a user can INSERT
+CREATE POLICY posts_insert_policy ON posts
+  FOR INSERT
+  TO app_role
+  WITH CHECK (
+    author_id = current_setting('app.user_id')::uuid  -- Can only create own posts
+  );
+
+-- Policy: what a user can UPDATE/DELETE
+CREATE POLICY posts_modify_policy ON posts
+  FOR UPDATE DELETE
+  TO app_role
+  USING (author_id = current_setting('app.user_id')::uuid);  -- Own posts only
+
+-- Application sets the context on each request
+-- PostgreSQL sessions — set per-transaction
+await db.query(`SET LOCAL app.user_id = '${userId}'`)
+-- Now all queries in this transaction are automatically filtered
+```
+
+**RLS with Supabase (makes RLS easy):**
+
+```sql
+-- Supabase sets auth.uid() automatically from JWT
+CREATE POLICY "Users see own data"
+  ON user_profiles
+  FOR ALL
+  USING (user_id = auth.uid());
+
+-- Admin bypass
+CREATE POLICY "Admins see all"
+  ON user_profiles
+  FOR ALL
+  USING (
+    auth.uid() IN (SELECT id FROM admins)
+  );
+```
+
+---
+
+## Security Headers
+
+Headers that browsers use to enforce security policies:
+
+```typescript
+import helmet from 'helmet'
+
+app.use(helmet({
+  // Prevent clickjacking — page cannot be embedded in iframes
+  frameguard: { action: 'deny' },
+
+  // Prevent MIME type sniffing
+  noSniff: true,
+
+  // HSTS — force HTTPS for 1 year
+  hsts: {
+    maxAge: 31536000,       // 1 year in seconds
+    includeSubDomains: true,
+    preload: true,
+  },
+
+  // XSS protection (legacy but still useful for IE)
+  xssFilter: true,
+
+  // Referrer policy — don't leak URLs in Referer header
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+
+  // Content Security Policy
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'nonce-xxx'"],
+      styleSrc: ["'self'", "https://fonts.googleapis.com"],
+      imgSrc: ["'self'", "https://cdn.example.com", "data:"],
+      connectSrc: ["'self'", "https://api.example.com", "wss://ws.example.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      objectSrc: ["'none'"],
+      frameAncestors: ["'none'"],
+      upgradeInsecureRequests: [],
+    }
+  },
+
+  // Permissions Policy — disable browser features you don't use
+  permittedCrossDomainPolicies: false,
+}))
+```
+
+---
+
+## Architecture Diagram
+
+```mermaid
+graph TB
+    subgraph External["🌐 Internet"]
+        ATTACKER[Attacker]
+        USER[Legitimate User]
+    end
+
+    subgraph Edge["🛡️ Edge Security"]
+        WAF[Web Application Firewall\nBlocklist · Rate limit · Geo-block]
+        DDOS[DDoS Protection\nCloudflare]
+    end
+
+    subgraph TLS_Term["🔐 TLS Termination"]
+        LB[Load Balancer\nHTTPS only · HSTS · OCSP stapling]
+    end
+
+    subgraph App["⚙️ Application Layer"]
+        AUTH_MW[Auth Middleware\nJWT · Session validation]
+        INPUT_VAL[Input Validation\nZod · sanitize]
+        HEADERS[Security Headers\nHelmet · CSP]
+        AUDIT[Audit Logger]
+    end
+
+    subgraph Data["🗄️ Data Layer"]
+        RLS[Row-Level Security\nPostgreSQL Policies]
+        ENCRYPT[Encryption at Rest\nAES-256]
+        PARAMS[Parameterized Queries\nORM · pg driver]
+    end
+
+    subgraph Secrets["🔑 Secrets"]
+        SM[AWS Secrets Manager\nRotated · Audited]
+    end
+
+    ATTACKER -->|Blocked| WAF
+    USER --> WAF --> LB
+    LB --> AUTH_MW
+    AUTH_MW --> INPUT_VAL --> HEADERS
+    HEADERS --> AUDIT
+    AUDIT --> RLS --> ENCRYPT --> PARAMS
+    SM -->|Injected at startup| App
+
+    style Edge fill:#fee2e2
+    style App fill:#dbeafe
+    style Data fill:#dcfce7
+    style Secrets fill:#fef9c3
+```
+
+---
+
+## Common Mistakes
+
+### 1. Trusting Client-Side Validation Only
+```typescript
+// ❌ Only validates in the browser
+// Client-side validation can be bypassed by sending raw HTTP requests
+function handleSubmit(data) {
+  if (!data.email) { showError('Email required'); return }
+  submitToServer(data)
+}
+
+// ✅ Always validate on the server — client validation is for UX only
+router.post('/users', (req, res) => {
+  const result = UserSchema.safeParse(req.body)
+  if (!result.success) return res.status(422).json(result.error)
+  // Server-side validation passed
+})
+```
+
+### 2. Verbose Error Messages
+```json
+// ❌ Leaks internal system details to attackers
+{
+  "error": "ERROR:  relation \"users\" does not exist\n  at /app/node_modules/pg/lib/query.js:76"
+}
+
+// ✅ Generic message to client, detailed log server-side
+// Response:
+{ "error": "Internal server error", "requestId": "abc-123" }
+// Server log (internal only):
+// ERROR [abc-123] DB query failed: relation "users" does not exist at src/repos/user.ts:45
+```
+
+### 3. Missing Rate Limiting on Auth Endpoints
+```typescript
+// ❌ No rate limiting — 100,000 password attempts per second possible
+app.post('/login', loginHandler)
+
+// ✅ Strict rate limiting on auth
+app.post('/login', rateLimit({
+  windowMs: 15 * 60 * 1000,  // 15 minutes
+  max: 5,                     // 5 attempts per IP per 15 min
+  message: { error: 'Too many login attempts, try again in 15 minutes' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  // Also lock account after N failures (see Layer 4)
+}), loginHandler)
+```
+
+---
+
+## Best Practices
+
+1. **Security by design** — Review security implications before writing code, not after.
+2. **Defense in depth** — Multiple layers: WAF, TLS, auth, input validation, RLS, encryption.
+3. **Principle of least privilege** — Every component (user, service, DB role) has only the permissions it needs.
+4. **Fail secure** — When errors occur, default to denying access, not allowing it.
+5. **Audit everything sensitive** — Login, privilege changes, data exports, admin actions logged with user ID and timestamp.
+6. **Regular dependency updates** — Dependabot + automated PRs for security patches.
+
+---
+
+## Interview-Level Insights
+
+### Q: What is SSRF and how do you prevent it?
+
+**A:** Server-Side Request Forgery. An attacker tricks your server into making HTTP requests to internal resources.
+
+Example: Your server accepts a URL and fetches it (`/fetch-image?url=...`). Attacker sends `url=http://169.254.169.254/latest/meta-data/iam/security-credentials/ec2-role` — this is the AWS instance metadata endpoint. Your server fetches it from inside the VPC, returns the IAM credentials. Attacker now has your AWS credentials.
+
+Prevention: Validate URLs against an allowlist of permitted domains. Block private IP ranges (10.x, 172.16-31.x, 192.168.x, 169.254.x). Use a DNS rebinding-aware library.
+
+### Q: Explain the difference between encryption and hashing.
+
+**A:** Encryption is reversible — encrypt with a key, decrypt with the same (or related) key. Use for: data you need to read back (credit card numbers, PII). Hashing is one-way — you cannot get the original input from the hash. Use for: passwords (you never need the plaintext, only verify that `hash(input) == stored_hash`).
+
+For passwords: use bcrypt or Argon2 (slow by design, salted). Never MD5 or SHA1 for passwords — they're fast, which makes brute-forcing trivial.
+
+---
+
+## Summary
+
+Security is a practice, not a product. The key principles:
+
+1. **Input is untrusted** — Validate and sanitize everything from users or external systems
+2. **Defense in depth** — No single layer can stop all attacks
+3. **Least privilege** — Grant minimum permissions everywhere
+4. **Encrypt at rest and in transit** — HTTPS always, database encryption on
+5. **Audit and monitor** — You can't respond to attacks you don't know happened
+6. **RLS at the database** — Last line of defense against application bugs
+
+---
+
+## Production Checklist
+
+- [ ] HTTPS everywhere (no HTTP in production)
+- [ ] HSTS header with `preload`
+- [ ] Security headers (CSP, X-Frame-Options, X-Content-Type-Options)
+- [ ] All inputs validated on server side (Zod/Joi)
+- [ ] Parameterized queries throughout (no string interpolation in SQL)
+- [ ] XSS prevention: no raw HTML injection, CSP configured
+- [ ] CSRF protection: SameSite cookies or CSRF tokens
+- [ ] Secrets in secrets manager (not .env or code)
+- [ ] RLS enabled on sensitive tables (PostgreSQL)
+- [ ] Auth endpoints rate-limited
+- [ ] Dependency vulnerability scanning (Snyk / Dependabot)
+- [ ] Security headers tested with securityheaders.com
+- [ ] Error messages don't leak internals
+- [ ] Audit log for sensitive operations
+- [ ] Web Application Firewall (WAF) in front of API
+
+---
+
+*Previous: [Layer 7: CI/CD →](../07-cicd/README.md) | Next: [Layer 9: Rate Limiting →](../09-rate-limiting/README.md)*
+5:["id","08-security","d"]
+0:["YpwDqN3CSJsk31PnZCA3K",[[["",{"children":["layer",{"children":[["id","08-security","d"],{"children":["__PAGE__?{\"id\":\"08-security\"}",{}]}]}]},"$undefined","$undefined",true],["",{"children":["layer",{"children":[["id","08-security","d"],{"children":["__PAGE__",{},[["$L1",["$","$L2",null,{"activeId":"08-security","content":"$3","headings":[{"id":"layer-8-security-row-level-security","text":"Layer 8: Security & Row-Level Security","level":1},{"id":"defense-in-depth-across-every-layer","text":"Defense in Depth Across Every Layer","level":2},{"id":"table-of-contents","text":"Table of Contents","level":2},{"id":"beginner-explanation","text":"Beginner Explanation","level":2},{"id":"the-owasp-top-10","text":"The OWASP Top 10","level":2},{"id":"sql-injection","text":"SQL Injection","level":2},{"id":"the-attack","text":"The Attack","level":3},{"id":"the-defense-parameterized-queries","text":"The Defense: Parameterized Queries","level":3},{"id":"stored-procedures-dont-help-if-used-wrong","text":"Stored Procedures Don't Help if Used Wrong","level":3},{"id":"cross-site-scripting-xss","text":"Cross-Site Scripting (XSS)","level":2},{"id":"types-of-xss","text":"Types of XSS","level":3},{"id":"defense","text":"Defense","level":3},{"id":"csrf-cross-site-request-forgery","text":"CSRF (Cross-Site Request Forgery)","level":2},{"id":"the-attack","text":"The Attack","level":3},{"id":"defense","text":"Defense","level":3},{"id":"transport-security-httpstls","text":"Transport Security (HTTPS/TLS)","level":2},{"id":"nginx-https-configuration","text":"Nginx HTTPS configuration","level":1},{"id":"redirect-all-http-to-https","text":"Redirect all HTTP to HTTPS","level":1},{"id":"secrets-management","text":"Secrets Management","level":2},{"id":"kubernetes-secrets-with-external-secrets-operator","text":"✅ Kubernetes Secrets with External Secrets Operator","level":1},{"id":"syncs-from-aws-secrets-manager-into-kubernetes-secrets","text":"Syncs from AWS Secrets Manager into Kubernetes Secrets","level":1},{"id":"zero-trust-security-model","text":"Zero Trust Security Model","level":2},{"id":"row-level-security-rls","text":"Row-Level Security (RLS)","level":2},{"id":"security-headers","text":"Security Headers","level":2},{"id":"architecture-diagram","text":"Architecture Diagram","level":2},{"id":"common-mistakes","text":"Common Mistakes","level":2},{"id":"1-trusting-client-side-validation-only","text":"1. Trusting Client-Side Validation Only","level":3},{"id":"2-verbose-error-messages","text":"2. Verbose Error Messages","level":3},{"id":"3-missing-rate-limiting-on-auth-endpoints","text":"3. Missing Rate Limiting on Auth Endpoints","level":3},{"id":"best-practices","text":"Best Practices","level":2},{"id":"interview-level-insights","text":"Interview-Level Insights","level":2},{"id":"q-what-is-ssrf-and-how-do-you-prevent-it","text":"Q: What is SSRF and how do you prevent it?","level":3},{"id":"q-explain-the-difference-between-encryption-and-hashing","text":"Q: Explain the difference between encryption and hashing.","level":3},{"id":"summary","text":"Summary","level":2},{"id":"production-checklist","text":"Production Checklist","level":2}]}]],null],null]},["$","$L4",null,{"parallelRouterKey":"children","segmentPath":["children","layer","children","$5","children"],"error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L6",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":"$undefined","notFoundStyles":"$undefined","styles":null}],null]},["$","$L4",null,{"parallelRouterKey":"children","segmentPath":["children","layer","children"],"error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L6",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":"$undefined","notFoundStyles":"$undefined","styles":null}],null]},[["$","html",null,{"lang":"en","className":"dark","children":["$","body",null,{"className":"__variable_3a51fa __variable_869224 font-sans bg-slate-950","children":["$","$L7",null,{"children":["$","$L4",null,{"parallelRouterKey":"children","segmentPath":["children"],"error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L6",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":{"fontFamily":"system-ui,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\"","height":"100vh","textAlign":"center","display":"flex","flexDirection":"column","alignItems":"center","justifyContent":"center"},"children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":{"display":"inline-block","margin":"0 20px 0 0","padding":"0 23px 0 0","fontSize":24,"fontWeight":500,"verticalAlign":"top","lineHeight":"49px"},"children":"404"}],["$","div",null,{"style":{"display":"inline-block"},"children":["$","h2",null,{"style":{"fontSize":14,"fontWeight":400,"lineHeight":"49px","margin":0},"children":"This page could not be found."}]}]]}]}]],"notFoundStyles":[],"styles":null}]}]}]}],null],null],[[["$","link","0",{"rel":"stylesheet","href":"/13-layer-fullstack-architecture/_next/static/css/57c025db925f868d.css","precedence":"next","crossOrigin":"$undefined"}]],[null,"$L8"]]]]]
+8:[["$","meta","0",{"name":"viewport","content":"width=device-width, initial-scale=1"}],["$","meta","1",{"charSet":"utf-8"}],["$","title","2",{"children":"13-Layer Full-Stack Architecture"}],["$","meta","3",{"name":"description","content":"A production-grade guide to modern full-stack systems — from the browser to disaster recovery."}]]
+1:null

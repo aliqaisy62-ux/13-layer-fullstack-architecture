@@ -1,0 +1,573 @@
+2:I[23809,["7059","static/chunks/7059-c1bf82d70a6e6fbe.js","7138","static/chunks/7138-e98f253141f957aa.js","9439","static/chunks/9439-70d869865e3180b8.js","4790","static/chunks/app/layer/%5Bid%5D/page-98a87148de46faea.js"],"default"]
+4:I[39275,[],""]
+6:I[61343,[],""]
+7:I[57163,["3185","static/chunks/app/layout-c561721c95941620.js"],"default"]
+3:T4715,# Layer 5: Hosting & Deployment
+## Where Your Application Lives and How It Gets There
+
+> **Layer role:** Hosting is the infrastructure that runs your application. Deployment is the process of getting new code to that infrastructure. Getting these right means your app is reliable, easy to update, and can recover from failures. Getting them wrong means weekend oncall calls and production fires.
+
+---
+
+## Table of Contents
+
+1. [Beginner Explanation](#beginner-explanation)
+2. [Types of Hosting](#types-of-hosting)
+3. [Containers & Docker](#containers--docker)
+4. [Deployment Strategies](#deployment-strategies)
+5. [Environment Management](#environment-management)
+6. [Serverless Deployment](#serverless-deployment)
+7. [Platform Comparison](#platform-comparison)
+8. [Architecture Diagram](#architecture-diagram)
+9. [Common Mistakes](#common-mistakes)
+10. [Best Practices](#best-practices)
+11. [Interview-Level Insights](#interview-level-insights)
+12. [Summary](#summary)
+13. [Production Checklist](#production-checklist)
+
+---
+
+## Beginner Explanation
+
+Hosting is simply where your app runs. Your laptop can run code locally, but users can't access your laptop. Hosting means putting your code on a computer (a server) that is:
+- Always on (24/7 uptime)
+- Connected to the internet with a public IP address
+- Powerful enough to handle many simultaneous users
+
+Deployment is how you get new code onto those servers. Early teams do it manually via SSH. Professional teams automate it with pipelines that test, build, and deploy every code change.
+
+---
+
+## Types of Hosting
+
+```mermaid
+graph TB
+    subgraph Options["Hosting Evolution"]
+        BARE[Bare Metal Server\nYou own the hardware\nMost control, most work]
+        VM[Virtual Machine - VPS\nRented slice of a server\nDigitalOcean, Linode, EC2]
+        CONTAINER[Container - Docker/K8s\nPackaged app + runtime\nPortable, scalable]
+        PAAS[PaaS - Platform as a Service\nDeploy code, not infra\nHeroku, Railway, Render]
+        SERVERLESS[Serverless Functions\nNo servers at all\nVercel, Netlify, Lambda]
+    end
+
+    style BARE fill:#fee2e2
+    style VM fill:#fef9c3
+    style CONTAINER fill:#dcfce7
+    style PAAS fill:#dbeafe
+    style SERVERLESS fill:#f3e8ff
+```
+
+| Type | You Manage | Provider Manages | Best For | Examples |
+|------|-----------|-----------------|----------|---------|
+| **Bare Metal** | OS, runtime, networking, hardware | Nothing | High-performance, specific hardware | HPC, gaming servers |
+| **VPS/VM** | OS, runtime, app | Hardware, network | Full control, cost-effective | DigitalOcean, AWS EC2 |
+| **Containers** | App, container config | Host OS, hardware | Portability, microservices | Docker + Kubernetes |
+| **PaaS** | App code | Everything else | Rapid deployment | Heroku, Railway, Render |
+| **Serverless** | Function code | Everything | Event-driven, auto-scale | Vercel, Lambda, Cloud Run |
+
+---
+
+## Containers & Docker
+
+Docker packages your application and all its dependencies into a **container** — a consistent, isolated environment that runs identically everywhere.
+
+```
+"It works on my machine" → Solved by Docker
+Your machine: Node 20, Ubuntu 22.04, specific npm packages
+Their server:  Node 18, CentOS 7, different packages  ← Bug
+
+Docker container: Node 20, exact npm packages, baked in
+Same everywhere: dev laptop, CI runner, staging, production ← No bug
+```
+
+### Dockerfile
+
+```dockerfile
+# ─── Build stage ─────────────────────────────────────────────
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# Copy package files first (cache optimization)
+# If these don't change, Docker reuses the cached layer
+COPY package*.json ./
+RUN npm ci --only=production && npm cache clean --force
+
+# Copy source and build
+COPY . .
+RUN npm run build
+
+# ─── Production stage ────────────────────────────────────────
+# Start fresh — only include what's needed to run
+FROM node:20-alpine AS production
+
+# Security: run as non-root user
+RUN addgroup -S app && adduser -S app -G app
+WORKDIR /app
+
+# Copy only built files and production dependencies
+COPY --from=builder --chown=app:app /app/dist ./dist
+COPY --from=builder --chown=app:app /app/node_modules ./node_modules
+COPY --from=builder --chown=app:app /app/package.json .
+
+USER app
+
+EXPOSE 3000
+
+# Health check — Kubernetes/load balancer uses this
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget -qO- http://localhost:3000/health || exit 1
+
+CMD ["node", "dist/main.js"]
+```
+
+### Docker Compose (Local Development)
+
+```yaml
+# docker-compose.yml
+version: '3.9'
+
+services:
+  api:
+    build:
+      context: .
+      target: development  # Use dev stage with hot reload
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - DATABASE_URL=postgresql://postgres:password@db:5432/myapp
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - .:/app                   # Mount source for hot reload
+      - /app/node_modules        # Don't override installed modules
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: myapp
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+volumes:
+  postgres_data:
+```
+
+---
+
+## Deployment Strategies
+
+Choosing the right deployment strategy determines how much risk each release carries.
+
+### Blue-Green Deployment
+
+```mermaid
+graph TB
+    subgraph Before["Before Deploy"]
+        LB1[Load Balancer] -->|100% traffic| BLUE[Blue Environment\nv1.0 - Current]
+        GREEN1[Green Environment\nv2.0 - New] --- IDLE[Idle / Warming up]
+    end
+
+    subgraph Switch["Instant Switch"]
+        LB2[Load Balancer] -->|0% traffic| BLUE2[Blue v1.0]
+        LB2 -->|100% traffic| GREEN2[Green v2.0]
+        Note1[Blue kept running\nfor instant rollback]
+    end
+
+    style Before fill:#dbeafe
+    style Switch fill:#dcfce7
+```
+
+**Blue-Green process:**
+1. Deploy new version to "green" environment
+2. Run smoke tests against green
+3. Switch load balancer to send all traffic to green (instant cutover)
+4. Keep blue running for 15-30 minutes (instant rollback if problems)
+5. Decommission blue after confidence period
+
+**Best for:** Minimal downtime, instant rollback, high-risk releases.
+
+---
+
+### Canary Deployment
+
+```mermaid
+graph LR
+    LB[Load Balancer] -->|95% traffic| OLD[v1.0 - Stable]
+    LB -->|5% traffic| NEW[v2.0 - Canary]
+
+    NEW --> METRICS[Monitor Error Rate\nLatency · Conversions]
+    METRICS -->|Metrics OK| ROLLOUT[Gradually increase %\n5% → 25% → 50% → 100%]
+    METRICS -->|Metrics bad| ROLLBACK[Rollback to 0%]
+```
+
+**Canary process:**
+1. Deploy new version alongside current
+2. Route 5% of users to new version
+3. Monitor: error rate, latency, business metrics
+4. Gradually increase percentage if metrics are healthy
+5. Roll back if anything looks wrong
+
+**Best for:** High-traffic systems, risk-averse teams, A/B testing new features.
+
+---
+
+### Rolling Deployment
+
+```
+Servers: [v1] [v1] [v1] [v1] [v1] [v1]
+
+Step 1:  [v2] [v1] [v1] [v1] [v1] [v1]  ← Replace one at a time
+Step 2:  [v2] [v2] [v1] [v1] [v1] [v1]
+Step 3:  [v2] [v2] [v2] [v1] [v1] [v1]
+...
+Final:   [v2] [v2] [v2] [v2] [v2] [v2]
+```
+
+**Best for:** Kubernetes deployments (default strategy), gradual rollouts.
+
+**Risk:** During rollout, v1 and v2 run simultaneously. Your API must be backward-compatible (see "Backwards Compatibility" in best practices).
+
+---
+
+### Feature Flags
+
+The most mature pattern: deploy code to 100% of servers but gate features with flags. Decouple deployment from release.
+
+```typescript
+// LaunchDarkly / GrowthBook / Unleash
+import { launchDarkly } from './featureFlags'
+
+async function getCheckoutFlow(userId: string) {
+  const useNewCheckout = await launchDarkly.variation('new-checkout-v2', {
+    key: userId,
+    // Can target by: userId, email, plan, country, random %
+  }, false)  // default = false
+
+  if (useNewCheckout) {
+    return renderNewCheckout()
+  }
+  return renderOldCheckout()
+}
+
+// Benefits:
+// - Deploy code to all servers at once
+// - Enable for 1% of users, monitor, then ramp up
+// - Instant kill switch: disable flag, feature off globally in seconds
+// - No new deployment needed to turn feature on/off
+```
+
+---
+
+## Environment Management
+
+```mermaid
+graph LR
+    CODE[Source Code] --> DEV[Development\nLocal / dev.app.com]
+    DEV --> STAGING[Staging\nstaging.app.com\nProduction-like data]
+    STAGING --> PROD[Production\napp.com]
+
+    style DEV fill:#dcfce7
+    style STAGING fill:#fef9c3
+    style PROD fill:#fee2e2
+```
+
+### Environment Variables
+
+```bash
+# .env.local (never committed to git)
+DATABASE_URL=postgresql://localhost/myapp_dev
+REDIS_URL=redis://localhost:6379
+JWT_SECRET=dev-secret-not-for-production
+STRIPE_SECRET_KEY=sk_test_...
+
+# .env.production (managed by platform / secrets manager)
+DATABASE_URL=postgresql://prod-host.cluster.example.com/myapp
+REDIS_URL=redis://prod-redis.cache.example.com:6379
+JWT_SECRET=${SECRET_FROM_AWS_SECRETS_MANAGER}
+STRIPE_SECRET_KEY=sk_live_...
+```
+
+```typescript
+// Validate env vars at startup — fail fast if misconfigured
+import { z } from 'zod'
+
+const envSchema = z.object({
+  DATABASE_URL: z.string().url(),
+  REDIS_URL: z.string().url(),
+  JWT_SECRET: z.string().min(32, 'JWT secret must be at least 32 characters'),
+  NODE_ENV: z.enum(['development', 'staging', 'production']),
+  PORT: z.string().regex(/^\d+$/).default('3000').transform(Number),
+  STRIPE_SECRET_KEY: z.string().startsWith('sk_'),
+})
+
+export const env = envSchema.parse(process.env)
+// If any variable is missing or invalid, the app crashes on startup
+// Better to fail at startup than to fail on first request
+```
+
+---
+
+## Serverless Deployment
+
+Serverless means you deploy functions, not servers. The cloud provider runs them on demand.
+
+```mermaid
+graph LR
+    REQ[HTTP Request] --> EDGE[Edge Network]
+    EDGE --> COLD{Function\nCold?}
+    COLD -- Yes --> INIT[Initialize Container\n~200ms cold start]
+    COLD -- No --> WARM[Reuse Container\n~1ms warm start]
+    INIT --> EXEC[Execute Function\n~50ms]
+    WARM --> EXEC
+    EXEC --> RES[Response]
+
+    style COLD fill:#fef9c3
+    style INIT fill:#fee2e2
+    style WARM fill:#dcfce7
+```
+
+```typescript
+// Vercel Function (serverless)
+// File: pages/api/users/[id].ts
+import type { NextApiRequest, NextApiResponse } from 'next'
+
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  const { id } = req.query
+
+  if (req.method === 'GET') {
+    const user = await db.user.findUnique({ where: { id: id as string } })
+    if (!user) return res.status(404).json({ error: 'Not found' })
+    return res.json(user)
+  }
+
+  if (req.method === 'PUT') {
+    // ...
+  }
+
+  res.setHeader('Allow', ['GET', 'PUT'])
+  res.status(405).end('Method Not Allowed')
+}
+
+export const config = {
+  runtime: 'edge',  // Run at CDN edge — ultra-low latency globally
+}
+```
+
+**Serverless pros:**
+- Zero server management
+- Auto-scales to zero (no traffic = no cost)
+- Instant global deployment
+- Pay per invocation
+
+**Serverless cons:**
+- Cold starts (first request after idle can be slow)
+- Execution time limits (15min max for Lambda)
+- Not suitable for: WebSockets, long-running processes, stateful apps
+- Database connections are problematic (use connection poolers like PgBouncer, Neon, Supabase)
+
+---
+
+## Platform Comparison
+
+| Platform | Type | Best For | Pricing Model | Verdict |
+|----------|------|---------|--------------|---------|
+| **Vercel** | Serverless/Edge | Next.js, frontend, edge functions | Per request + bandwidth | Best for Next.js apps |
+| **Netlify** | Serverless/Edge | Static sites, Jamstack | Per build + bandwidth | Best for static/Jamstack |
+| **Railway** | PaaS (containers) | Full-stack apps, databases | Per compute hour | Best for early-stage startups |
+| **Render** | PaaS (containers) | Web services, workers, DBs | Per compute hour | Heroku alternative |
+| **Fly.io** | Containers | Global low-latency apps | Per compute | Best for geo-distributed |
+| **AWS ECS/EKS** | Containers | Enterprise, complex infra | Per resource | Best for large scale |
+| **Google Cloud Run** | Serverless containers | APIs, microservices | Per request | Best serverless containers |
+| **DigitalOcean App Platform** | PaaS | Simple apps, cost-effective | Per app | Best bang for buck |
+
+---
+
+## Architecture Diagram
+
+```mermaid
+graph TB
+    subgraph Dev["👩‍💻 Developer Machine"]
+        CODE[Source Code]
+        DOCKER_LOCAL[Docker Compose\nLocal Environment]
+    end
+
+    subgraph CI["🤖 CI/CD Pipeline"]
+        TESTS[Automated Tests]
+        BUILD[Docker Build]
+        SCAN[Security Scan]
+        PUSH[Push to Registry]
+    end
+
+    subgraph Registry["📦 Container Registry"]
+        ECR[AWS ECR\nVersioned Images]
+    end
+
+    subgraph Staging["🟡 Staging Environment"]
+        STAGE_LB[Load Balancer]
+        STAGE_APP[App Containers]
+        STAGE_DB[(Staging DB)]
+    end
+
+    subgraph Production["🟢 Production Environment"]
+        PROD_LB[Load Balancer]
+        PROD_APP_OLD[v1.0 - 95%]
+        PROD_APP_NEW[v2.0 - 5% Canary]
+        PROD_DB[(Production DB)]
+        PROD_CACHE[(Redis Cache)]
+    end
+
+    CODE --> CI
+    CI --> TESTS
+    TESTS -->|Pass| BUILD
+    BUILD --> SCAN
+    SCAN -->|Pass| PUSH
+    PUSH --> ECR
+    ECR --> Staging
+    STAGE_APP --> STAGE_DB
+    ECR -->|After staging approval| Production
+    PROD_LB --> PROD_APP_OLD & PROD_APP_NEW
+    PROD_APP_OLD & PROD_APP_NEW --> PROD_DB
+    PROD_APP_OLD & PROD_APP_NEW --> PROD_CACHE
+
+    style Dev fill:#dbeafe
+    style CI fill:#fef9c3
+    style Staging fill:#dcfce7
+    style Production fill:#fee2e2
+```
+
+---
+
+## Common Mistakes
+
+### 1. Same Config Across Environments
+```yaml
+# ❌ Using production DB URL in staging — staging tests corrupt prod data
+DATABASE_URL: postgresql://prod-host/myapp
+
+# ✅ Separate environments, separate resources
+staging:
+  DATABASE_URL: postgresql://staging-host/myapp_staging
+production:
+  DATABASE_URL: postgresql://prod-host/myapp
+```
+
+### 2. Not Testing Rollback
+```bash
+# ❌ Only testing forward deployments
+# When rollback is needed (3am production incident), nobody knows how
+
+# ✅ Practice rollbacks in staging monthly
+# Document rollback procedures
+# Kubernetes rollback:
+kubectl rollout undo deployment/api --to-revision=5
+# Verify rollback worked:
+kubectl rollout status deployment/api
+```
+
+### 3. Missing Health Checks
+```typescript
+// ❌ Load balancer routes traffic to crashed container
+
+// ✅ Health endpoint checks all dependencies
+app.get('/health', async (req, res) => {
+  const checks = await Promise.allSettled([
+    db.query('SELECT 1'),
+    redis.ping(),
+  ])
+
+  const healthy = checks.every(c => c.status === 'fulfilled')
+  res.status(healthy ? 200 : 503).json({
+    status: healthy ? 'healthy' : 'degraded',
+    checks: {
+      database: checks[0].status,
+      redis: checks[1].status,
+    }
+  })
+})
+```
+
+---
+
+## Best Practices
+
+1. **Immutable deployments** — Never modify running containers. Deploy new containers, shift traffic, kill old ones.
+2. **Zero-downtime deploys** — Use rolling/blue-green. Maintenance windows are a last resort.
+3. **Backwards-compatible changes** — When adding a column, add it nullable first. Never rename a column in one deploy.
+4. **Health checks everywhere** — Load balancer, Kubernetes, monitoring system all check `/health`.
+5. **Automate everything** — If you're SSHing to deploy, you will forget a step at 2am.
+
+---
+
+## Interview-Level Insights
+
+### Q: Explain the 12-factor app methodology.
+
+**A:** The 12-factor app is a methodology for building software-as-a-service apps that are: portable across environments, cloud-native, and can scale. Key factors relevant to hosting:
+
+- **Codebase**: One codebase, multiple deploys
+- **Config**: Store config in environment variables (not in code)
+- **Processes**: Run as stateless processes (state in DB/Redis, not in-memory)
+- **Port binding**: Export services via port binding (self-contained HTTP server)
+- **Concurrency**: Scale out via the process model (horizontal, not vertical)
+- **Disposability**: Fast startup, graceful shutdown — containers are cattle, not pets
+
+### Q: What's the difference between a blue-green and a canary deployment?
+
+**A:** Blue-green is binary — 100% of traffic switches instantly. It's safe (easy rollback), but provides no gradual validation. Canary is gradual — start with 5%, grow to 100% based on metrics. It validates new code with real users before full rollout. Blue-green is simpler; canary is safer for large user bases.
+
+---
+
+## Summary
+
+Hosting and deployment are where code meets reality. The key principles:
+
+1. **Containerize everything** — Docker makes environments reproducible
+2. **Automate deployments** — Human error causes most outages
+3. **Choose a strategy** — Rolling for low risk, canary for high-traffic, blue-green for instant rollback
+4. **Separate environments** — Dev, staging, production must be isolated
+5. **Health check everything** — Know before users do
+
+---
+
+## Production Checklist
+
+- [ ] Docker multi-stage builds (minimal production image)
+- [ ] Non-root user in containers
+- [ ] Health check endpoint on every service
+- [ ] Zero-downtime deployment strategy chosen
+- [ ] Rollback procedure documented and tested
+- [ ] Environment variables validated at startup
+- [ ] Secrets in secrets manager (not .env files)
+- [ ] Staging environment mirrors production
+- [ ] Container registry with image scanning enabled
+- [ ] Resource limits set on containers (CPU/memory)
+- [ ] Graceful shutdown handler (SIGTERM)
+- [ ] Feature flags for risky changes
+
+---
+
+*Previous: [Layer 4: Auth →](../04-auth/README.md) | Next: [Layer 6: Cloud & Compute →](../06-cloud/README.md)*
+5:["id","05-hosting","d"]
+0:["YpwDqN3CSJsk31PnZCA3K",[[["",{"children":["layer",{"children":[["id","05-hosting","d"],{"children":["__PAGE__?{\"id\":\"05-hosting\"}",{}]}]}]},"$undefined","$undefined",true],["",{"children":["layer",{"children":[["id","05-hosting","d"],{"children":["__PAGE__",{},[["$L1",["$","$L2",null,{"activeId":"05-hosting","content":"$3","headings":[{"id":"layer-5-hosting-deployment","text":"Layer 5: Hosting & Deployment","level":1},{"id":"where-your-application-lives-and-how-it-gets-there","text":"Where Your Application Lives and How It Gets There","level":2},{"id":"table-of-contents","text":"Table of Contents","level":2},{"id":"beginner-explanation","text":"Beginner Explanation","level":2},{"id":"types-of-hosting","text":"Types of Hosting","level":2},{"id":"containers-docker","text":"Containers & Docker","level":2},{"id":"dockerfile","text":"Dockerfile","level":3},{"id":"build-stage","text":"─── Build stage ─────────────────────────────────────────────","level":1},{"id":"copy-package-files-first-cache-optimization","text":"Copy package files first (cache optimization)","level":1},{"id":"if-these-dont-change-docker-reuses-the-cached-layer","text":"If these don't change, Docker reuses the cached layer","level":1},{"id":"copy-source-and-build","text":"Copy source and build","level":1},{"id":"production-stage","text":"─── Production stage ────────────────────────────────────────","level":1},{"id":"start-fresh-only-include-whats-needed-to-run","text":"Start fresh — only include what's needed to run","level":1},{"id":"security-run-as-non-root-user","text":"Security: run as non-root user","level":1},{"id":"copy-only-built-files-and-production-dependencies","text":"Copy only built files and production dependencies","level":1},{"id":"health-check-kubernetesload-balancer-uses-this","text":"Health check — Kubernetes/load balancer uses this","level":1},{"id":"docker-compose-local-development","text":"Docker Compose (Local Development)","level":3},{"id":"docker-composeyml","text":"docker-compose.yml","level":1},{"id":"deployment-strategies","text":"Deployment Strategies","level":2},{"id":"blue-green-deployment","text":"Blue-Green Deployment","level":3},{"id":"canary-deployment","text":"Canary Deployment","level":3},{"id":"rolling-deployment","text":"Rolling Deployment","level":3},{"id":"feature-flags","text":"Feature Flags","level":3},{"id":"environment-management","text":"Environment Management","level":2},{"id":"environment-variables","text":"Environment Variables","level":3},{"id":"envlocal-never-committed-to-git","text":".env.local (never committed to git)","level":1},{"id":"envproduction-managed-by-platform-secrets-manager","text":".env.production (managed by platform / secrets manager)","level":1},{"id":"serverless-deployment","text":"Serverless Deployment","level":2},{"id":"platform-comparison","text":"Platform Comparison","level":2},{"id":"architecture-diagram","text":"Architecture Diagram","level":2},{"id":"common-mistakes","text":"Common Mistakes","level":2},{"id":"1-same-config-across-environments","text":"1. Same Config Across Environments","level":3},{"id":"using-production-db-url-in-staging-staging-tests-corrupt-pro","text":"❌ Using production DB URL in staging — staging tests corrupt prod data","level":1},{"id":"separate-environments-separate-resources","text":"✅ Separate environments, separate resources","level":1},{"id":"2-not-testing-rollback","text":"2. Not Testing Rollback","level":3},{"id":"only-testing-forward-deployments","text":"❌ Only testing forward deployments","level":1},{"id":"when-rollback-is-needed-3am-production-incident-nobody-knows","text":"When rollback is needed (3am production incident), nobody knows how","level":1},{"id":"practice-rollbacks-in-staging-monthly","text":"✅ Practice rollbacks in staging monthly","level":1},{"id":"document-rollback-procedures","text":"Document rollback procedures","level":1},{"id":"kubernetes-rollback","text":"Kubernetes rollback:","level":1},{"id":"verify-rollback-worked","text":"Verify rollback worked:","level":1},{"id":"3-missing-health-checks","text":"3. Missing Health Checks","level":3},{"id":"best-practices","text":"Best Practices","level":2},{"id":"interview-level-insights","text":"Interview-Level Insights","level":2},{"id":"q-explain-the-12-factor-app-methodology","text":"Q: Explain the 12-factor app methodology.","level":3},{"id":"q-whats-the-difference-between-a-blue-green-and-a-canary-dep","text":"Q: What's the difference between a blue-green and a canary deployment?","level":3},{"id":"summary","text":"Summary","level":2},{"id":"production-checklist","text":"Production Checklist","level":2}]}]],null],null]},["$","$L4",null,{"parallelRouterKey":"children","segmentPath":["children","layer","children","$5","children"],"error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L6",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":"$undefined","notFoundStyles":"$undefined","styles":null}],null]},["$","$L4",null,{"parallelRouterKey":"children","segmentPath":["children","layer","children"],"error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L6",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":"$undefined","notFoundStyles":"$undefined","styles":null}],null]},[["$","html",null,{"lang":"en","className":"dark","children":["$","body",null,{"className":"__variable_3a51fa __variable_869224 font-sans bg-slate-950","children":["$","$L7",null,{"children":["$","$L4",null,{"parallelRouterKey":"children","segmentPath":["children"],"error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L6",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":{"fontFamily":"system-ui,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\"","height":"100vh","textAlign":"center","display":"flex","flexDirection":"column","alignItems":"center","justifyContent":"center"},"children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":{"display":"inline-block","margin":"0 20px 0 0","padding":"0 23px 0 0","fontSize":24,"fontWeight":500,"verticalAlign":"top","lineHeight":"49px"},"children":"404"}],["$","div",null,{"style":{"display":"inline-block"},"children":["$","h2",null,{"style":{"fontSize":14,"fontWeight":400,"lineHeight":"49px","margin":0},"children":"This page could not be found."}]}]]}]}]],"notFoundStyles":[],"styles":null}]}]}]}],null],null],[[["$","link","0",{"rel":"stylesheet","href":"/13-layer-fullstack-architecture/_next/static/css/57c025db925f868d.css","precedence":"next","crossOrigin":"$undefined"}]],[null,"$L8"]]]]]
+8:[["$","meta","0",{"name":"viewport","content":"width=device-width, initial-scale=1"}],["$","meta","1",{"charSet":"utf-8"}],["$","title","2",{"children":"13-Layer Full-Stack Architecture"}],["$","meta","3",{"name":"description","content":"A production-grade guide to modern full-stack systems — from the browser to disaster recovery."}]]
+1:null

@@ -1,0 +1,609 @@
+2:I[23809,["7059","static/chunks/7059-c1bf82d70a6e6fbe.js","7138","static/chunks/7138-e98f253141f957aa.js","9439","static/chunks/9439-70d869865e3180b8.js","4790","static/chunks/app/layer/%5Bid%5D/page-98a87148de46faea.js"],"default"]
+4:I[39275,[],""]
+6:I[61343,[],""]
+7:I[57163,["3185","static/chunks/app/layout-c561721c95941620.js"],"default"]
+3:T530c,# Layer 10: Caching & CDN
+## Speed at Every Level of the Stack
+
+> **Layer role:** Caching stores copies of frequently accessed data closer to where it's needed — in memory, at the edge, in the browser — to reduce latency and database load. A well-designed caching strategy can reduce API response times from 500ms to 5ms and eliminate 90%+ of database queries.
+
+---
+
+## Table of Contents
+
+1. [Beginner Explanation](#beginner-explanation)
+2. [Cache Hierarchy](#cache-hierarchy)
+3. [Browser Caching](#browser-caching)
+4. [CDN Architecture](#cdn-architecture)
+5. [Application Cache (Redis)](#application-cache-redis)
+6. [Database Query Cache](#database-query-cache)
+7. [Cache Invalidation Strategies](#cache-invalidation-strategies)
+8. [Cache Patterns](#cache-patterns)
+9. [CDN Technologies](#cdn-technologies)
+10. [Architecture Diagram](#architecture-diagram)
+11. [Common Mistakes](#common-mistakes)
+12. [Best Practices](#best-practices)
+13. [Interview-Level Insights](#interview-level-insights)
+14. [Summary](#summary)
+15. [Production Checklist](#production-checklist)
+
+---
+
+## Beginner Explanation
+
+Imagine you work at a company with a huge library of documents in the basement. Every time someone asks you a question, you have to walk to the basement, find the document, walk back, and read the answer. This takes 5 minutes each time.
+
+Now imagine keeping photocopies of the most-asked-about documents on your desk. Same question? Answer in 5 seconds. That's caching — keeping copies of data closer to where it's needed.
+
+The challenge: when the original document changes (basement), your photocopy is outdated. This is the cache invalidation problem — one of the hardest problems in computer science.
+
+---
+
+## Cache Hierarchy
+
+```
+Fastest ↑                                                    Closest to user
+─────────────────────────────────────────────────────────────────────────────
+L1: Browser Memory Cache      ~0ms      JS variables, React state
+L2: Browser HTTP Cache        ~0ms      Cached responses on disk
+L3: Service Worker Cache      ~1ms      PWA offline cache
+L4: CDN Edge Node            ~5-20ms    Closest geographic PoP
+L5: API Server Memory        ~0.1ms    In-process object cache
+L6: Redis / Memcached        ~1ms      Shared in-memory data store
+L7: Read Replicas            ~5ms      DB read without write contention
+L8: Primary Database         ~10-50ms  Source of truth
+─────────────────────────────────────────────────────────────────────────────
+Slowest ↓                                                   Furthest from user
+
+Cache hit: Return from current level
+Cache miss: Go to next level, then backfill current level
+```
+
+---
+
+## Browser Caching
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant CDN as CDN
+    participant S as Server
+
+    Note over B,S: First visit
+    B->>CDN: GET /app.js
+    CDN->>S: Cache miss → forward
+    S-->>CDN: app.js + Cache-Control: max-age=31536000, immutable
+    CDN-->>B: app.js (cache this for 1 year)
+    B->>B: Store in browser cache
+
+    Note over B,S: Second visit (within 1 year)
+    B->>B: Check browser cache — HIT
+    B->>B: Serve from disk — no network request!
+
+    Note over B,S: HTML (short cache — must be fresh)
+    B->>CDN: GET /index.html
+    CDN-->>B: index.html + Cache-Control: no-cache, must-revalidate
+    B->>CDN: Conditional request: If-None-Match: "etag123"
+    CDN-->>B: 304 Not Modified (no body — saves bandwidth)
+```
+
+### Cache-Control Headers
+
+```
+Cache-Control: max-age=31536000, immutable
+  → Cache for 1 year. Content never changes (hashed filename).
+  → Use for: JS bundles, CSS, images with content-hash filenames
+  → app.abc123.js — filename changes when content changes
+
+Cache-Control: no-cache
+  → Must revalidate with server before using cached version.
+  → Use for: index.html (must always have latest JS references)
+  → With ETag: only downloads body if content changed (304)
+
+Cache-Control: no-store
+  → Never cache this. Never write to disk.
+  → Use for: sensitive responses (banking, health data)
+  → Strict privacy requirement
+
+Cache-Control: public, max-age=300
+  → Cache for 5 minutes, CDN and browser both cache.
+  → Use for: news articles, product pages (change occasionally)
+
+Cache-Control: private, max-age=3600
+  → Cache only in browser (not CDN). User-specific data.
+  → Use for: user profile, dashboard data
+```
+
+```nginx
+# Nginx cache headers by file type
+location ~* \.(js|css|woff2)$ {
+    # Hashed filenames — immutable for 1 year
+    add_header Cache-Control "public, max-age=31536000, immutable";
+}
+
+location ~* \.(png|jpg|webp|svg)$ {
+    # Images — cache for 30 days (may change)
+    add_header Cache-Control "public, max-age=2592000";
+    add_header Vary "Accept";  # Vary by Accept header for WebP negotiation
+}
+
+location = /index.html {
+    # HTML — revalidate every request
+    add_header Cache-Control "no-cache, must-revalidate";
+}
+
+location /api/ {
+    # API responses — no browser caching (CDN may cache via headers)
+    add_header Cache-Control "no-store";
+}
+```
+
+---
+
+## CDN Architecture
+
+A CDN (Content Delivery Network) has hundreds of servers (Points of Presence / PoPs) globally. When a user requests a resource, they're served from the nearest PoP.
+
+```mermaid
+graph TB
+    subgraph Users["👤 Users Worldwide"]
+        NYC[New York User]
+        LON[London User]
+        SYD[Sydney User]
+        TOK[Tokyo User]
+    end
+
+    subgraph CDN_Edge["🌐 CDN Edge Nodes (200+ PoPs)"]
+        NYC_POP[NYC PoP\nCache: HIT]
+        LON_POP[London PoP\nCache: HIT]
+        SYD_POP[Sydney PoP\nCache: MISS]
+        TOK_POP[Tokyo PoP\nCache: HIT]
+    end
+
+    subgraph Origin["🏠 Origin Servers (us-east-1)"]
+        ORIGIN[Your API + App Servers]
+    end
+
+    NYC --> NYC_POP
+    LON --> LON_POP
+    SYD --> SYD_POP
+    TOK --> TOK_POP
+
+    NYC_POP -->|Cache hit, 8ms| NYC
+    LON_POP -->|Cache hit, 12ms| LON
+    SYD_POP -->|Cache miss → fetch origin| ORIGIN
+    ORIGIN -->|Response + cache it| SYD_POP
+    SYD_POP -->|200ms (includes origin fetch)| SYD
+    TOK_POP -->|Cache hit, 15ms| TOK
+
+    style CDN_Edge fill:#dcfce7
+    style Origin fill:#fee2e2
+```
+
+**What CDNs cache:**
+- Static assets (JS, CSS, images, fonts, videos)
+- API responses (with appropriate Cache-Control)
+- Rendered HTML (for SSR/ISR pages)
+
+**What CDNs cannot cache:**
+- User-specific responses (must have `private` or no-cache headers)
+- POST/PUT/DELETE requests (by default)
+- Responses with `Set-Cookie` headers (unless configured)
+
+---
+
+## Application Cache (Redis)
+
+Redis is the workhorse of application-level caching. In-memory, ~1ms latency, rich data structures.
+
+```typescript
+import { createClient } from 'redis'
+
+const redis = createClient({ url: process.env.REDIS_URL })
+await redis.connect()
+
+// ── Cache-Aside Pattern (most common) ───────────────────────
+async function getUserProfile(userId: string): Promise<UserProfile> {
+  const cacheKey = `user:${userId}:profile`
+
+  // 1. Check cache
+  const cached = await redis.get(cacheKey)
+  if (cached) {
+    return JSON.parse(cached)
+  }
+
+  // 2. Cache miss — fetch from DB
+  const user = await db.user.findUnique({
+    where: { id: userId },
+    include: { profile: true, stats: true }
+  })
+  if (!user) throw new NotFoundError('User', userId)
+
+  // 3. Store in cache with TTL
+  const ttl = 300  // 5 minutes
+  await redis.setex(cacheKey, ttl, JSON.stringify(user))
+
+  return user
+}
+
+// ── Cache Invalidation ──────────────────────────────────────
+async function updateUserProfile(userId: string, data: UpdateProfileInput) {
+  // Update database first
+  await db.user.update({ where: { id: userId }, data })
+
+  // Invalidate cache — next read fetches fresh from DB
+  await redis.del(`user:${userId}:profile`)
+
+  // If user appears in lists/feeds, invalidate those too
+  await redis.del(`feed:followers:${userId}`)
+}
+
+// ── Complex Cached Object (sorted set for leaderboard) ──────
+async function updateLeaderboard(userId: string, score: number) {
+  await redis.zadd('leaderboard:weekly', { score, member: userId })
+}
+
+async function getTopPlayers(limit = 10) {
+  const cacheKey = `leaderboard:top:${limit}`
+  const cached = await redis.get(cacheKey)
+  if (cached) return JSON.parse(cached)
+
+  // Fetch top N from sorted set (scores stored in Redis already)
+  const topIds = await redis.zrevrange('leaderboard:weekly', 0, limit - 1, 'WITHSCORES')
+
+  // Batch fetch user data
+  const users = await db.user.findMany({
+    where: { id: { in: topIds.filter((_, i) => i % 2 === 0) } }
+  })
+
+  const result = users.map((u, i) => ({ ...u, score: parseFloat(topIds[i * 2 + 1]) }))
+  await redis.setex(cacheKey, 60, JSON.stringify(result))  // Cache 1 minute
+  return result
+}
+```
+
+### Redis Data Structures
+
+| Structure | Example Key | Use Case | Command |
+|-----------|------------|---------|---------|
+| **String** | `user:123:profile` | Simple object cache | `GET/SET` |
+| **Hash** | `session:abc123` | Session data (field-level access) | `HGET/HSET` |
+| **List** | `notifications:user:123` | Activity feed, job queue | `LPUSH/LRANGE` |
+| **Set** | `online:users` | Unique items, membership | `SADD/SMEMBERS` |
+| **Sorted Set** | `leaderboard:2024` | Rankings, time-series | `ZADD/ZRANGE` |
+| **Stream** | `events:purchases` | Event log, pub/sub | `XADD/XREAD` |
+| **Bitmap** | `daily:active:2024-01` | Counting unique events efficiently | `SETBIT/BITCOUNT` |
+
+---
+
+## Cache Invalidation Strategies
+
+> "There are only two hard things in Computer Science: cache invalidation and naming things." — Phil Karlton
+
+### Strategy 1: TTL (Time to Live)
+
+```typescript
+// Simplest strategy: let cache expire on its own
+await redis.setex('user:123', 300, JSON.stringify(user))  // Expires in 5 minutes
+
+// Pros: Simple, no explicit invalidation needed
+// Cons: Stale data for up to TTL duration
+
+// Choose TTL based on:
+// - How often data changes
+// - How much staleness is acceptable
+// - Database load savings
+
+const ttls = {
+  'user:profile': 300,       // 5 min — changes occasionally
+  'post:123': 3600,          // 1 hour — rarely changes
+  'global:config': 86400,    // 1 day — almost never changes
+  'feed:latest': 60,         // 1 minute — changes frequently
+  'session:*': 1800,         // 30 min — auto-expire idle sessions
+  'trending:topics': 300,    // 5 min — aggregate, okay if slightly stale
+}
+```
+
+### Strategy 2: Write-Through Cache
+
+```typescript
+// Write to cache AND database simultaneously on every update
+async function updatePost(postId: string, data: UpdatePostInput) {
+  const [updatedPost] = await Promise.all([
+    db.post.update({ where: { id: postId }, data }),
+    redis.setex(`post:${postId}`, 3600, JSON.stringify({
+      ...existingPost,
+      ...data,
+      updatedAt: new Date().toISOString(),
+    })),
+  ])
+
+  return updatedPost
+}
+
+// Pros: Cache always consistent with DB
+// Cons: Every write touches both DB and cache (higher write latency)
+// Best for: Read-heavy with infrequent writes
+```
+
+### Strategy 3: Cache-Aside (Lazy Loading)
+
+```typescript
+// Only cache on read misses. Explicitly invalidate on writes.
+// Most common pattern — already shown above
+
+// Pros: Only cache data that's actually read, simple
+// Cons: Cache cold on startup, first request after invalidation is slow
+```
+
+### Strategy 4: Event-Driven Invalidation
+
+```typescript
+// Database trigger or application event invalidates cache
+// Best for: complex invalidation logic, multiple cache keys per data change
+
+// Subscribe to database changes via CDC (Change Data Capture)
+// PostgreSQL LISTEN/NOTIFY
+await db.query(`LISTEN user_updates`)
+db.on('notification', async (msg) => {
+  const { userId } = JSON.parse(msg.payload)
+  // Invalidate all cache keys related to this user
+  const keys = await redis.keys(`user:${userId}:*`)
+  if (keys.length) await redis.del(keys)
+})
+
+// Application event (when you control the write)
+eventBus.on('user.profile.updated', async ({ userId }) => {
+  await Promise.all([
+    redis.del(`user:${userId}:profile`),
+    redis.del(`user:${userId}:feed`),
+    redis.del(`suggestions:*`),  // User profile affects suggestions
+  ])
+})
+```
+
+---
+
+## Cache Patterns
+
+### Cache Stampede (Thundering Herd) Problem
+
+```
+Problem:
+  1. Cache key expires (TTL hit)
+  2. 1000 concurrent requests check cache — all miss simultaneously
+  3. All 1000 requests query the database
+  4. Database overwhelmed with 1000 identical queries
+  5. System either slows dramatically or crashes
+
+Solutions:
+```
+
+```typescript
+// Solution 1: Lock (mutex) — only one request queries DB
+async function getCachedUser(userId: string) {
+  const cacheKey = `user:${userId}`
+  const lockKey = `lock:${cacheKey}`
+
+  // Try cache first
+  const cached = await redis.get(cacheKey)
+  if (cached) return JSON.parse(cached)
+
+  // Try to acquire lock
+  const locked = await redis.set(lockKey, '1', { NX: true, EX: 5 })
+
+  if (locked) {
+    try {
+      const user = await db.user.findUnique({ where: { id: userId } })
+      await redis.setex(cacheKey, 300, JSON.stringify(user))
+      return user
+    } finally {
+      await redis.del(lockKey)
+    }
+  } else {
+    // Another request has the lock — wait briefly and re-check cache
+    await new Promise(resolve => setTimeout(resolve, 100))
+    const retryCache = await redis.get(cacheKey)
+    if (retryCache) return JSON.parse(retryCache)
+    // Fall through to DB (lock may have failed/expired)
+    return db.user.findUnique({ where: { id: userId } })
+  }
+}
+
+// Solution 2: Early expiration + background refresh
+async function getCachedUserEarlyExpire(userId: string) {
+  const cached = await redis.get(`user:${userId}`)
+  if (cached) {
+    const { data, expiresAt } = JSON.parse(cached)
+    // If expiring within next 30s, refresh in background
+    if (expiresAt - Date.now() < 30000) {
+      refreshInBackground(userId)  // Don't await — update quietly
+    }
+    return data
+  }
+  // ... cache miss logic
+}
+```
+
+### Read-Through Cache (ORM-Level)
+
+```typescript
+// Prisma extension for automatic caching
+import { withAccelerate } from '@prisma/extension-accelerate'
+const prisma = new PrismaClient().$extends(withAccelerate())
+
+// Every findUnique/findMany automatically cached by Prisma Accelerate
+const user = await prisma.user.findUnique({
+  where: { id: userId },
+  cacheStrategy: {
+    swr: 60,   // Stale-while-revalidate 60s
+    ttl: 300,  // Invalidate after 5 minutes
+  }
+})
+```
+
+---
+
+## CDN Technologies
+
+| Provider | Strengths | Use Case | Pricing |
+|---------|-----------|---------|---------|
+| **Cloudflare** | Security, DDoS, Workers, free tier | Most apps | Free → paid |
+| **AWS CloudFront** | AWS integration, Lambda@Edge | AWS ecosystem | Pay per GB |
+| **Fastly** | Real-time config changes (<5s), detailed analytics | Large e-commerce | Pay per GB |
+| **Akamai** | Largest edge network, enterprise | Enterprise | Enterprise contract |
+| **Vercel Edge** | Next.js, edge functions | Next.js/React apps | Usage-based |
+| **Bunny CDN** | Cheapest, good performance | Budget-conscious | Pay per GB |
+
+---
+
+## Architecture Diagram
+
+```mermaid
+graph TB
+    subgraph User["👤 User"]
+        BR[Browser\nL1 Cache: Memory\nL2 Cache: HTTP Disk]
+    end
+
+    subgraph Edge["🌐 CDN Edge (Cloudflare/CloudFront)"]
+        POP1[PoP NYC\nStatic: cached\nAPI: pass-through]
+        POP2[PoP London]
+    end
+
+    subgraph App_Cache["⚡ Application Cache"]
+        REDIS_CLUSTER[Redis Cluster\nUser profiles · Sessions\nFeed · Config · Counters]
+    end
+
+    subgraph App["⚙️ API Servers"]
+        API[API + In-Process Cache\nHot objects in Node.js heap]
+    end
+
+    subgraph DB["🗄️ Database"]
+        PG_PRIMARY[(PostgreSQL Primary)]
+        PG_REPLICA[(Read Replica\nQuery cache + OS page cache)]
+    end
+
+    BR -->|Cached static| BR
+    BR -->|Cache miss| POP1
+    POP1 -->|Static asset hit| BR
+    POP1 -->|API or miss| API
+    API -->|Cache hit| REDIS_CLUSTER
+    REDIS_CLUSTER -->|HIT| API
+    API -->|Cache miss| PG_REPLICA
+    PG_REPLICA -->|Results| API
+    API -->|Backfill| REDIS_CLUSTER
+
+    style User fill:#dbeafe
+    style Edge fill:#dcfce7
+    style App_Cache fill:#fef9c3
+    style DB fill:#fce7f3
+```
+
+---
+
+## Common Mistakes
+
+### 1. Caching User-Specific Data in CDN
+```typescript
+// ❌ User's dashboard page cached at CDN — User A sees User B's data!
+res.setHeader('Cache-Control', 'public, max-age=3600')
+
+// ✅ Private (per-user) responses are browser-only
+// User-specific API responses — no CDN caching
+res.setHeader('Cache-Control', 'private, no-cache')
+
+// ✅ Use Vary header if response varies by cookie/header
+res.setHeader('Vary', 'Cookie, Accept-Language')
+```
+
+### 2. Caching Without Considering Consistency
+```typescript
+// ❌ 1-hour cache on user balance — user pays, sees stale balance
+await redis.setex(`user:${id}:balance`, 3600, balance.toString())
+
+// ✅ Short TTL or invalidate on write
+// For financial data: either very short TTL or no cache at all
+// If you must cache: invalidate immediately on balance change
+async function recordPayment(userId: string, amount: number) {
+  await db.account.update({ ... })
+  await redis.del(`user:${userId}:balance`)  // Immediate invalidation
+}
+```
+
+### 3. No Cache Warm-up
+```bash
+# ❌ After deploy: all caches empty → DB hammered → site slow for 10 min
+# ✅ Warm up cache before switching traffic (blue-green)
+# Pre-populate top N most-requested items before deploying
+node scripts/warm-cache.js --top-users=10000 --top-posts=50000
+```
+
+---
+
+## Best Practices
+
+1. **Cache at the right level** — Static assets → CDN. Computed objects → Redis. User session → Redis. DB queries → read replica or Redis.
+2. **Set appropriate TTLs** — Don't over-cache changing data. Don't under-cache stable data.
+3. **Cache keys must be unique** — Include all dimensions: `user:{userId}:posts:{page}:{sort}`
+4. **Monitor hit rates** — A hit rate below 70% means your caching strategy needs work.
+5. **Plan for stampedes** — Use locks or probabilistic early refresh for popular keys.
+
+---
+
+## Interview-Level Insights
+
+### Q: What is the difference between write-through and write-back cache?
+
+**A:** Write-through: on every write, update both cache and database synchronously. Cache is always consistent with DB. Higher write latency. Safer — no data loss if cache crashes.
+
+Write-back (write-behind): write to cache first, return success, then asynchronously write to database. Lower write latency, risk of data loss if cache crashes before the background write completes. Used in storage systems (SSDs use write-back internally).
+
+For web applications: write-through or cache-aside are most common. Write-back is too risky for most OLTP workloads.
+
+### Q: How does a CDN cache work, and how do you invalidate it?
+
+**A:** CDN edge nodes cache responses based on the URL + Vary headers + Cache-Control headers from the origin. When a cache miss occurs, the edge node fetches from origin and stores the response.
+
+Invalidation: 1) Wait for TTL expiration (simplest), 2) Programmatic purge via CDN API (Cloudflare API, CloudFront invalidations), 3) URL versioning (cache-busting via content hash in filename — no invalidation needed).
+
+URL versioning is the best practice for static assets — change the filename when content changes. No invalidation needed, perfect cache hits.
+
+---
+
+## Summary
+
+Caching is one of the highest-leverage optimizations in system design:
+
+1. **Browser cache** — Immutable content-hashed filenames, no-cache for HTML
+2. **CDN** — Edge-served static assets globally, millisecond latency
+3. **Redis** — Shared application cache, sub-millisecond access, rich data structures
+4. **Cache-aside** — The most flexible and common pattern
+5. **Invalidation** — TTL for simplicity, event-driven for consistency
+
+A 90% cache hit rate on your API means 90% fewer database queries. At scale, this is the difference between a $10K database and a $100K one.
+
+---
+
+## Production Checklist
+
+- [ ] Static assets served with content-hash filenames (immutable caching)
+- [ ] CDN configured for static assets
+- [ ] Cache-Control headers set correctly per resource type
+- [ ] Redis cluster (not single node) for HA
+- [ ] Redis persistence configured (AOF or RDB) for durability
+- [ ] Cache key naming convention documented
+- [ ] TTL values chosen based on data change frequency
+- [ ] Cache invalidation logic for all write paths
+- [ ] Cache hit rate monitored (target > 80%)
+- [ ] Stampede protection on high-traffic keys
+- [ ] No user-specific data in CDN cache (Vary header or private)
+- [ ] Redis maxmemory policy set (allkeys-lru for cache use case)
+- [ ] Redis memory usage monitored and alerting configured
+
+---
+
+*Previous: [Layer 9: Rate Limiting →](../09-rate-limiting/README.md) | Next: [Layer 11: Scaling →](../11-scaling/README.md)*
+5:["id","10-caching","d"]
+0:["YpwDqN3CSJsk31PnZCA3K",[[["",{"children":["layer",{"children":[["id","10-caching","d"],{"children":["__PAGE__?{\"id\":\"10-caching\"}",{}]}]}]},"$undefined","$undefined",true],["",{"children":["layer",{"children":[["id","10-caching","d"],{"children":["__PAGE__",{},[["$L1",["$","$L2",null,{"activeId":"10-caching","content":"$3","headings":[{"id":"layer-10-caching-cdn","text":"Layer 10: Caching & CDN","level":1},{"id":"speed-at-every-level-of-the-stack","text":"Speed at Every Level of the Stack","level":2},{"id":"table-of-contents","text":"Table of Contents","level":2},{"id":"beginner-explanation","text":"Beginner Explanation","level":2},{"id":"cache-hierarchy","text":"Cache Hierarchy","level":2},{"id":"browser-caching","text":"Browser Caching","level":2},{"id":"cache-control-headers","text":"Cache-Control Headers","level":3},{"id":"nginx-cache-headers-by-file-type","text":"Nginx cache headers by file type","level":1},{"id":"cdn-architecture","text":"CDN Architecture","level":2},{"id":"application-cache-redis","text":"Application Cache (Redis)","level":2},{"id":"redis-data-structures","text":"Redis Data Structures","level":3},{"id":"cache-invalidation-strategies","text":"Cache Invalidation Strategies","level":2},{"id":"strategy-1-ttl-time-to-live","text":"Strategy 1: TTL (Time to Live)","level":3},{"id":"strategy-2-write-through-cache","text":"Strategy 2: Write-Through Cache","level":3},{"id":"strategy-3-cache-aside-lazy-loading","text":"Strategy 3: Cache-Aside (Lazy Loading)","level":3},{"id":"strategy-4-event-driven-invalidation","text":"Strategy 4: Event-Driven Invalidation","level":3},{"id":"cache-patterns","text":"Cache Patterns","level":2},{"id":"cache-stampede-thundering-herd-problem","text":"Cache Stampede (Thundering Herd) Problem","level":3},{"id":"read-through-cache-orm-level","text":"Read-Through Cache (ORM-Level)","level":3},{"id":"cdn-technologies","text":"CDN Technologies","level":2},{"id":"architecture-diagram","text":"Architecture Diagram","level":2},{"id":"common-mistakes","text":"Common Mistakes","level":2},{"id":"1-caching-user-specific-data-in-cdn","text":"1. Caching User-Specific Data in CDN","level":3},{"id":"2-caching-without-considering-consistency","text":"2. Caching Without Considering Consistency","level":3},{"id":"3-no-cache-warm-up","text":"3. No Cache Warm-up","level":3},{"id":"after-deploy-all-caches-empty-db-hammered-site-slow-for-10-m","text":"❌ After deploy: all caches empty → DB hammered → site slow for 10 min","level":1},{"id":"warm-up-cache-before-switching-traffic-blue-green","text":"✅ Warm up cache before switching traffic (blue-green)","level":1},{"id":"pre-populate-top-n-most-requested-items-before-deploying","text":"Pre-populate top N most-requested items before deploying","level":1},{"id":"best-practices","text":"Best Practices","level":2},{"id":"interview-level-insights","text":"Interview-Level Insights","level":2},{"id":"q-what-is-the-difference-between-write-through-and-write-bac","text":"Q: What is the difference between write-through and write-back cache?","level":3},{"id":"q-how-does-a-cdn-cache-work-and-how-do-you-invalidate-it","text":"Q: How does a CDN cache work, and how do you invalidate it?","level":3},{"id":"summary","text":"Summary","level":2},{"id":"production-checklist","text":"Production Checklist","level":2}]}]],null],null]},["$","$L4",null,{"parallelRouterKey":"children","segmentPath":["children","layer","children","$5","children"],"error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L6",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":"$undefined","notFoundStyles":"$undefined","styles":null}],null]},["$","$L4",null,{"parallelRouterKey":"children","segmentPath":["children","layer","children"],"error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L6",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":"$undefined","notFoundStyles":"$undefined","styles":null}],null]},[["$","html",null,{"lang":"en","className":"dark","children":["$","body",null,{"className":"__variable_3a51fa __variable_869224 font-sans bg-slate-950","children":["$","$L7",null,{"children":["$","$L4",null,{"parallelRouterKey":"children","segmentPath":["children"],"error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L6",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":{"fontFamily":"system-ui,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\"","height":"100vh","textAlign":"center","display":"flex","flexDirection":"column","alignItems":"center","justifyContent":"center"},"children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":{"display":"inline-block","margin":"0 20px 0 0","padding":"0 23px 0 0","fontSize":24,"fontWeight":500,"verticalAlign":"top","lineHeight":"49px"},"children":"404"}],["$","div",null,{"style":{"display":"inline-block"},"children":["$","h2",null,{"style":{"fontSize":14,"fontWeight":400,"lineHeight":"49px","margin":0},"children":"This page could not be found."}]}]]}]}]],"notFoundStyles":[],"styles":null}]}]}]}],null],null],[[["$","link","0",{"rel":"stylesheet","href":"/13-layer-fullstack-architecture/_next/static/css/57c025db925f868d.css","precedence":"next","crossOrigin":"$undefined"}]],[null,"$L8"]]]]]
+8:[["$","meta","0",{"name":"viewport","content":"width=device-width, initial-scale=1"}],["$","meta","1",{"charSet":"utf-8"}],["$","title","2",{"children":"13-Layer Full-Stack Architecture"}],["$","meta","3",{"name":"description","content":"A production-grade guide to modern full-stack systems — from the browser to disaster recovery."}]]
+1:null
