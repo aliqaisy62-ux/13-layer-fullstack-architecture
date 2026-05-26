@@ -1,0 +1,754 @@
+# Layer 12: Error Tracking & Observability
+## Knowing What's Happening in Your System — Before Users Tell You
+
+> **Layer role:** Observability is the ability to understand what's happening inside your system by looking at its outputs — logs, metrics, and traces. Without observability, a production system is a black box. You can't fix what you can't see.
+
+---
+
+## Table of Contents
+
+1. [Beginner Explanation](#beginner-explanation)
+2. [The Three Pillars of Observability](#the-three-pillars-of-observability)
+3. [Structured Logging](#structured-logging)
+4. [Metrics & Dashboards](#metrics--dashboards)
+5. [Distributed Tracing](#distributed-tracing)
+6. [Error Tracking](#error-tracking)
+7. [Alerting](#alerting)
+8. [SLOs, SLAs, and SLIs](#slos-slas-and-slis)
+9. [Incident Response](#incident-response)
+10. [Technology Stack](#technology-stack)
+11. [Architecture Diagram](#architecture-diagram)
+12. [Common Mistakes](#common-mistakes)
+13. [Best Practices](#best-practices)
+14. [Interview-Level Insights](#interview-level-insights)
+15. [Summary](#summary)
+16. [Production Checklist](#production-checklist)
+
+---
+
+## Beginner Explanation
+
+Imagine you're a pilot flying at night in clouds. Without instruments (altimeter, airspeed, heading), you have no idea where you are or if you're about to crash. Instruments give you **visibility** into what's happening inside the plane and outside.
+
+Production software is the same. Without observability tools, you're blind:
+- "Is the site slow?" — You don't know
+- "Did that deploy break something?" — You find out from angry users
+- "Which service is causing the 500 errors?" — You guess
+
+With observability: dashboards show you in real time what's happening, alerts wake you up before users notice, and traces show you exactly which line of code is slow.
+
+---
+
+## The Three Pillars of Observability
+
+```mermaid
+graph TB
+    subgraph Pillars["Three Pillars of Observability"]
+        LOGS["📋 Logs
+        Discrete events with context
+        'User 123 login failed at 14:32:01'
+        'Payment charge failed: card declined'
+        WHAT happened and WHEN"]
+
+        METRICS["📊 Metrics
+        Aggregated numbers over time
+        HTTP requests/second: 1,247
+        Error rate: 0.3%
+        p95 latency: 143ms
+        HOW MUCH / HOW OFTEN"]
+
+        TRACES["🔍 Traces
+        Full request journey across services
+        User → CDN → API (23ms) → Auth (5ms) → DB (87ms)
+        WHY it's slow / WHERE it failed"]
+    end
+
+    style LOGS fill:#dbeafe
+    style METRICS fill:#dcfce7
+    style TRACES fill:#fef9c3
+```
+
+**The relationship:**
+- **Metrics** tell you something is wrong (error rate spike)
+- **Logs** help you understand what happened (which requests failed)
+- **Traces** show you where in the system it failed (which service, which query)
+
+---
+
+## Structured Logging
+
+Unstructured logs are nearly useless at scale. Structured logs (JSON) are queryable, filterable, and analyzable.
+
+```typescript
+// ❌ Unstructured — impossible to query at scale
+console.log(`User ${userId} logged in from ${ip} at ${time}`)
+// Log: "User 12345 logged in from 192.168.1.1 at 2024-01-15T14:32:01Z"
+// How do you find all logins from EU IPs? Count failures per hour? CANNOT.
+
+// ✅ Structured JSON — every field is queryable
+import pino from 'pino'
+
+const logger = pino({
+  level: process.env.LOG_LEVEL ?? 'info',
+  // In production: output JSON
+  // In development: pretty-print with pino-pretty
+  transport: process.env.NODE_ENV === 'development'
+    ? { target: 'pino-pretty' }
+    : undefined,
+})
+
+// Correlation ID middleware — tracks request across all logs
+app.use((req, res, next) => {
+  req.requestId = req.headers['x-request-id'] ?? crypto.randomUUID()
+  req.log = logger.child({ requestId: req.requestId })
+  next()
+})
+
+// Service-level logger with context
+req.log.info({
+  event: 'user.login',
+  userId: user.id,
+  email: user.email,
+  ip: req.ip,
+  userAgent: req.headers['user-agent'],
+  country: req.headers['cf-ipcountry'],  // Cloudflare header
+  duration: Date.now() - startTime,
+})
+
+// Log produced:
+{
+  "level": "info",
+  "time": "2024-01-15T14:32:01.123Z",
+  "requestId": "550e8400-e29b-41d4-a716-446655440000",
+  "event": "user.login",
+  "userId": "usr_abc123",
+  "email": "alice@example.com",
+  "ip": "192.168.1.1",
+  "country": "GB",
+  "duration": 142
+}
+// Elasticsearch query: event:user.login AND country:GB AND duration:>1000
+// → All slow logins from UK
+```
+
+### Log Levels and When to Use Them
+
+```typescript
+// ERROR: Something failed and needs human attention
+logger.error({ event: 'payment.failed', userId, error: err.message, amount })
+
+// WARN: Something unexpected but not breaking
+logger.warn({ event: 'cache.miss', key, reason: 'TTL expired' })
+
+// INFO: Normal significant events (not too frequent)
+logger.info({ event: 'user.created', userId, plan: 'free' })
+logger.info({ event: 'order.completed', orderId, amount, userId })
+
+// DEBUG: Detailed diagnostic info (disabled in production by default)
+logger.debug({ event: 'db.query', sql, params, duration })
+
+// NEVER log:
+// - Passwords, tokens, secrets
+// - Full credit card numbers
+// - PII that doesn't need to be there
+// - High-frequency per-row data (DB query results)
+```
+
+### Request/Response Logging Middleware
+
+```typescript
+app.use((req, res, next) => {
+  const startTime = Date.now()
+  const requestId = crypto.randomUUID()
+  req.requestId = requestId
+
+  // Log incoming request
+  logger.info({
+    event: 'http.request',
+    requestId,
+    method: req.method,
+    path: req.path,
+    query: req.query,
+    ip: req.ip,
+    userId: req.user?.id,
+  })
+
+  // Intercept response to log it
+  const originalEnd = res.end.bind(res)
+  res.end = function(...args) {
+    logger.info({
+      event: 'http.response',
+      requestId,
+      method: req.method,
+      path: req.path,
+      statusCode: res.statusCode,
+      duration: Date.now() - startTime,
+      userId: req.user?.id,
+      contentLength: res.getHeader('content-length'),
+    })
+    return originalEnd(...args)
+  }
+
+  next()
+})
+```
+
+---
+
+## Metrics & Dashboards
+
+Metrics are numerical measurements taken over time. They're aggregated and graphed to show trends.
+
+### The Four Golden Signals (Google SRE)
+
+```
+1. LATENCY
+   The time it takes to service a request.
+   Track: p50, p95, p99 (not average — averages hide outliers)
+   Target: p95 < 200ms, p99 < 500ms for most APIs
+
+2. TRAFFIC
+   How much demand is on your system.
+   Examples: requests/second, active users, jobs/minute
+   Use for: capacity planning, anomaly detection
+
+3. ERRORS
+   The rate of requests that fail.
+   Track: HTTP 5xx rate, uncaught exceptions, failed jobs
+   Target: < 0.1% error rate for most services
+
+4. SATURATION
+   How "full" your system is.
+   CPU usage, memory usage, queue depth, DB connections
+   At 100% saturation, something will break
+   Alert at 80% saturation (gives time to react)
+```
+
+### Prometheus Metrics in Node.js
+
+```typescript
+import { Registry, Counter, Histogram, Gauge } from 'prom-client'
+
+const registry = new Registry()
+
+// Counter: monotonically increasing (requests, errors, events)
+const httpRequests = new Counter({
+  name: 'http_requests_total',
+  help: 'Total HTTP requests',
+  labelNames: ['method', 'route', 'status_code'],
+  registers: [registry],
+})
+
+// Histogram: distribution of values (latency, request size)
+const httpDuration = new Histogram({
+  name: 'http_request_duration_seconds',
+  help: 'HTTP request duration in seconds',
+  labelNames: ['method', 'route', 'status_code'],
+  buckets: [0.01, 0.05, 0.1, 0.2, 0.5, 1, 2, 5],  // Define bucket boundaries
+  registers: [registry],
+})
+
+// Gauge: value that can go up and down (active connections, queue depth)
+const activeConnections = new Gauge({
+  name: 'active_connections',
+  help: 'Number of active HTTP connections',
+  registers: [registry],
+})
+
+// Instrument your middleware
+app.use((req, res, next) => {
+  activeConnections.inc()
+  const end = httpDuration.startTimer({
+    method: req.method,
+    route: req.route?.path ?? 'unknown',
+  })
+
+  res.on('finish', () => {
+    httpRequests.inc({
+      method: req.method,
+      route: req.route?.path ?? 'unknown',
+      status_code: res.statusCode,
+    })
+    end({ status_code: res.statusCode })
+    activeConnections.dec()
+  })
+
+  next()
+})
+
+// Expose metrics endpoint for Prometheus to scrape
+app.get('/metrics', async (req, res) => {
+  res.set('Content-Type', registry.contentType)
+  res.end(await registry.metrics())
+})
+```
+
+### Grafana Dashboard Panels
+
+```
+Dashboard: API Health Overview
+
+Row 1: Traffic
+┌─────────────────────────────┬─────────────────────────────┐
+│ Requests/second (last 1hr)  │ Active connections           │
+│ Graph: line chart           │ Stat: current number         │
+└─────────────────────────────┴─────────────────────────────┘
+
+Row 2: Errors
+┌─────────────────────────────┬─────────────────────────────┐
+│ Error rate % (5xx / total)  │ Error count by endpoint      │
+│ Threshold: red > 1%         │ Table: top 10 error routes   │
+└─────────────────────────────┴─────────────────────────────┘
+
+Row 3: Latency
+┌─────────────────────────────┬─────────────────────────────┐
+│ p50/p95/p99 latency         │ Latency heatmap              │
+│ Graph: multi-line            │ Shows distribution over time │
+└─────────────────────────────┴─────────────────────────────┘
+
+Row 4: Resources
+┌────────────────┬────────────────┬────────────────┐
+│ CPU %          │ Memory %       │ DB connections  │
+│ Threshold: 80% │ Threshold: 85% │ Threshold: 80%  │
+└────────────────┴────────────────┴────────────────┘
+```
+
+---
+
+## Distributed Tracing
+
+When a request spans multiple services, you need to trace its entire journey.
+
+```mermaid
+gantt
+    title Trace: GET /api/feed (350ms total)
+    dateFormat X
+    axisFormat %Lms
+
+    section Frontend
+    DNS Lookup           : 0, 5
+    TLS Handshake        : 5, 15
+
+    section CDN
+    Edge Processing      : 15, 18
+
+    section Load Balancer
+    Routing              : 18, 20
+
+    section API Server (api-pod-2)
+    Middleware Chain     : 20, 35
+
+    section Auth Service
+    JWT Verification     : 35, 45
+
+    section Redis
+    Feed Cache Lookup    : 45, 47
+
+    section Database
+    Feed Query           : 47, 130
+
+    section Redis
+    Cache Backfill       : 130, 133
+
+    section API Server
+    Response Serialization : 133, 145
+
+    section CDN
+    Compress + Send      : 145, 150
+```
+
+```typescript
+import { NodeTracerProvider } from '@opentelemetry/sdk-node'
+import { Resource } from '@opentelemetry/resources'
+import { SemanticResourceAttributes } from '@opentelemetry/semantic-conventions'
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http'
+
+// Initialize OpenTelemetry (industry standard)
+const provider = new NodeTracerProvider({
+  resource: new Resource({
+    [SemanticResourceAttributes.SERVICE_NAME]: 'api',
+    [SemanticResourceAttributes.SERVICE_VERSION]: process.env.APP_VERSION,
+    environment: process.env.NODE_ENV,
+  }),
+})
+
+provider.addSpanProcessor(
+  new BatchSpanProcessor(new OTLPTraceExporter({
+    url: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,  // Datadog, Jaeger, Tempo
+  }))
+)
+
+// Auto-instrumentation — instruments HTTP, Express, Prisma, Redis automatically
+import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node'
+// Every Express route, every Prisma query, every Redis call → automatic spans
+
+// Manual span for custom operations
+const tracer = trace.getTracer('api')
+
+async function processOrder(orderId: string) {
+  return tracer.startActiveSpan('processOrder', async (span) => {
+    span.setAttributes({
+      'order.id': orderId,
+      'order.source': 'web',
+    })
+    try {
+      const result = await doProcessing(orderId)
+      span.setStatus({ code: SpanStatusCode.OK })
+      return result
+    } catch (err) {
+      span.recordException(err)
+      span.setStatus({ code: SpanStatusCode.ERROR, message: err.message })
+      throw err
+    } finally {
+      span.end()
+    }
+  })
+}
+```
+
+---
+
+## Error Tracking
+
+Errors in production need to be captured with full context — stack trace, user info, breadcrumbs.
+
+```typescript
+import * as Sentry from '@sentry/node'
+import { nodeProfilingIntegration } from '@sentry/profiling-node'
+
+Sentry.init({
+  dsn: process.env.SENTRY_DSN,
+  environment: process.env.NODE_ENV,
+  release: process.env.APP_VERSION,
+  tracesSampleRate: 0.1,    // Sample 10% of transactions for performance
+  profilesSampleRate: 0.1,  // Profile 10% (CPU profiling)
+  integrations: [nodeProfilingIntegration()],
+})
+
+// Set user context on every request
+app.use((req, res, next) => {
+  if (req.user) {
+    Sentry.setUser({
+      id: req.user.id,
+      email: req.user.email,
+      username: req.user.name,
+    })
+  }
+  next()
+})
+
+// Capture expected errors with additional context
+try {
+  await processPayment(order)
+} catch (err) {
+  Sentry.withScope(scope => {
+    scope.setTag('payment.provider', 'stripe')
+    scope.setContext('order', {
+      id: order.id,
+      amount: order.amount,
+      currency: order.currency,
+    })
+    Sentry.captureException(err)
+  })
+  throw err
+}
+
+// Sentry Express error handler (must be last middleware)
+app.use(Sentry.Handlers.errorHandler({
+  shouldHandleError: (error) => {
+    // Only capture 5xx errors, not 4xx (client errors are expected)
+    return error.statusCode >= 500 || !error.statusCode
+  }
+}))
+```
+
+---
+
+## Alerting
+
+Alerts should be actionable, accurate, and not too noisy.
+
+```yaml
+# Prometheus AlertManager rules
+groups:
+  - name: api.rules
+    rules:
+      # High error rate — critical, page oncall immediately
+      - alert: HighErrorRate
+        expr: |
+          (
+            sum(rate(http_requests_total{status_code=~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total[5m]))
+          ) > 0.01
+        for: 2m   # Must be elevated for 2 minutes (reduces false positives)
+        labels:
+          severity: critical
+          team: backend
+        annotations:
+          summary: "High error rate: {{ $value | humanizePercentage }}"
+          description: "5xx error rate above 1% for 2 minutes. Check Sentry for errors."
+          runbook: "https://runbooks.example.com/high-error-rate"
+          dashboard: "https://grafana.example.com/d/api-health"
+
+      # High latency — warning, investigate during business hours
+      - alert: HighLatency
+        expr: |
+          histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 latency above 500ms"
+          description: "95th percentile latency: {{ $value }}s"
+
+      # Database connection pool exhaustion — warning, will become critical
+      - alert: DBConnectionPoolHigh
+        expr: db_pool_active_connections / db_pool_max_connections > 0.8
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DB connection pool at {{ $value | humanizePercentage }}"
+          description: "Connection pool nearly exhausted. Will fail at 100%."
+
+      # Certificate expiry — warning well in advance
+      - alert: CertificateExpiringSoon
+        expr: ssl_certificate_expiry_seconds < 30 * 24 * 3600  # 30 days
+        labels:
+          severity: warning
+        annotations:
+          summary: "TLS certificate expiring in {{ $value | humanizeDuration }}"
+```
+
+---
+
+## SLOs, SLAs, and SLIs
+
+```
+SLI (Service Level Indicator):
+  A metric that measures the health of a service.
+  Examples:
+    - HTTP success rate (% of requests returning 2xx)
+    - Latency p95 (95th percentile response time)
+    - Availability (% of time service responds at all)
+
+SLO (Service Level Objective):
+  Your internal target for an SLI.
+  Examples:
+    - Success rate: 99.9% over rolling 30 days
+    - p95 latency: < 200ms over rolling 7 days
+    - Availability: 99.95% per month
+
+SLA (Service Level Agreement):
+  A contractual commitment to customers.
+  Usually less strict than SLO (internal SLO gives you buffer).
+  Example: "We guarantee 99.9% monthly uptime. Violations → credit."
+
+Error Budget:
+  The allowance between SLO and 100%.
+  SLO = 99.9% → Error budget = 0.1% per month = 43.8 minutes/month
+  When you've used your error budget, slow down deployments.
+```
+
+---
+
+## Incident Response
+
+```mermaid
+flowchart TD
+    DETECT[🚨 Alert fires\nor user reports issue] --> TRIAGE{Severity?}
+
+    TRIAGE -->|P1: All users affected| P1[Page on-call\nimmediately]
+    TRIAGE -->|P2: Some users affected| P2[Notify team\nnext 15 min]
+    TRIAGE -->|P3: Minor degradation| P3[Create ticket\nnormal hours]
+
+    P1 --> INCIDENT[Create incident channel\n#incident-2024-01-15-api]
+    INCIDENT --> IC[Assign Incident Commander]
+    IC --> INVESTIGATE[Investigate\nLogs · Metrics · Traces]
+    INVESTIGATE --> ROOT_CAUSE{Root cause found?}
+    ROOT_CAUSE -->|Yes| MITIGATE[Mitigate immediately\nRollback · Feature flag · Scale]
+    ROOT_CAUSE -->|No| ESCALATE[Escalate to\nDomain experts]
+    ESCALATE --> INVESTIGATE
+    MITIGATE --> RESOLVED[Alert resolved]
+    RESOLVED --> POSTMORTEM[Post-mortem within 48hr\nBlameless · Root cause · Action items]
+```
+
+---
+
+## Technology Stack
+
+| Tool | Category | Use Case | Pricing |
+|------|---------|---------|---------|
+| **Sentry** | Error tracking | Exception capture + alerting | Free → paid |
+| **Datadog** | Full observability | Logs + metrics + traces + APM | Expensive but best |
+| **Grafana Cloud** | Dashboards | Visualize any metric source | Free tier available |
+| **Prometheus** | Metrics | Open-source metrics collection | Free (self-hosted) |
+| **Loki** | Log aggregation | Grafana-native logging | Free (self-hosted) |
+| **Jaeger** | Distributed tracing | Open-source traces | Free (self-hosted) |
+| **OpenTelemetry** | Instrumentation standard | Vendor-neutral telemetry | Free |
+| **PagerDuty** | Incident management | On-call routing + escalation | Paid |
+| **Elasticsearch/Kibana** | Log search | Full-text log search | Self-hosted or Elastic Cloud |
+
+---
+
+## Architecture Diagram
+
+```mermaid
+graph TB
+    subgraph Services["🖥️ Services"]
+        API[API Servers]
+        WORKER[Workers]
+        DB[(Database)]
+    end
+
+    subgraph Telemetry["📡 Telemetry Pipeline"]
+        OTEL[OpenTelemetry Collector]
+        API -->|traces, metrics, logs| OTEL
+        WORKER -->|traces, metrics, logs| OTEL
+        DB -->|metrics| OTEL
+    end
+
+    subgraph Storage["💾 Observability Storage"]
+        PROM[(Prometheus\nMetrics)]
+        LOKI[(Loki\nLogs)]
+        TEMPO[(Tempo\nTraces)]
+        SENTRY[Sentry\nErrors]
+    end
+
+    subgraph Viz["📊 Visualization & Alerting"]
+        GRAFANA[Grafana\nDashboards]
+        AM[AlertManager\nAlert Rules]
+        PD[PagerDuty\nOn-call Routing]
+        SLACK[Slack\nNotifications]
+    end
+
+    OTEL -->|metrics| PROM
+    OTEL -->|logs| LOKI
+    OTEL -->|traces| TEMPO
+    API -->|exceptions| SENTRY
+
+    PROM & LOKI & TEMPO & SENTRY --> GRAFANA
+    PROM --> AM
+    AM --> PD & SLACK
+    PD -->|Page oncall| ENGINEER[👤 On-call Engineer]
+
+    style Services fill:#dbeafe
+    style Telemetry fill:#fef9c3
+    style Storage fill:#dcfce7
+    style Viz fill:#fce7f3
+```
+
+---
+
+## Common Mistakes
+
+### 1. Alerting on Symptoms, Not Causes
+```yaml
+# ❌ Alerting on individual symptoms — alert fatigue
+- alert: CPU > 70%
+- alert: Memory > 80%
+- alert: Disk > 75%
+- alert: 100 alerts per night → oncall ignores them
+
+# ✅ Alert on user-impacting outcomes
+- alert: HighErrorRate       # Users seeing errors
+- alert: HighLatency         # Users experiencing slowness
+- alert: ServiceDown         # Users can't reach service
+# Investigate CPU/memory as part of investigation, not alerting
+```
+
+### 2. Log Noise Without Signal
+```typescript
+// ❌ Log every DB query in production — terabytes of useless logs
+logger.debug({ sql: query, params })  // Thousands per second
+
+// ❌ Log without context — useless for debugging
+logger.info('User updated')  // Which user? What fields? What changed?
+
+// ✅ Log significant events with full context
+logger.info({
+  event: 'user.profile.updated',
+  userId: user.id,
+  changes: Object.keys(data),  // Log WHAT changed, not the values
+  duration: Date.now() - start,
+})
+```
+
+### 3. No Runbooks
+```yaml
+# ❌ Alert fires at 3am with no guidance
+annotations:
+  summary: "High error rate"
+
+# ✅ Every alert links to a runbook
+annotations:
+  summary: "High error rate: {{ $value }}"
+  runbook: "https://runbooks.example.com/high-error-rate"
+  # Runbook contains: symptoms, causes, investigation steps, remediation
+```
+
+---
+
+## Best Practices
+
+1. **Correlation IDs everywhere** — Attach request ID to every log line and trace span. Makes it possible to find all logs for one request.
+2. **Never log sensitive data** — No passwords, tokens, PII, credit card numbers. Use `user.id` not `user.email` where possible.
+3. **Log at appropriate levels** — `INFO` for significant events, `WARN` for anomalies, `ERROR` for failures. Never `console.log` in production.
+4. **Alert on user experience** — Alert when users are affected, not when metrics are slightly elevated.
+5. **Post-mortems are blameless** — Focus on system improvement, not blame. Bad processes cause incidents, not bad people.
+
+---
+
+## Interview-Level Insights
+
+### Q: What is the difference between monitoring and observability?
+
+**A:** Monitoring is knowing when something is wrong (alerting). Observability is being able to understand why it's wrong — having enough context to debug novel failures you didn't predict.
+
+Monitoring asks: "Is the system healthy?" (binary). Observability asks: "Why is this new, unexpected behavior happening?" (open-ended). You need both: monitoring catches known failure modes, observability handles unknown unknowns.
+
+### Q: What are the four golden signals?
+
+**A:** Google's SRE book defines four signals that, together, provide a complete view of system health:
+1. **Latency** — How long requests take (p95/p99, not average)
+2. **Traffic** — How much demand is on the system
+3. **Errors** — Rate of failed requests
+4. **Saturation** — How "full" the system is (CPU, memory, queue depth)
+
+If you can only instrument four things, these are the four.
+
+---
+
+## Summary
+
+Observability is what lets you run reliable production systems. Without it, you're flying blind.
+
+1. **Logs** tell you what happened and provide context for debugging
+2. **Metrics** show trends, catch regressions, trigger alerts
+3. **Traces** reveal where time is spent across distributed systems
+4. **Errors** capture exceptions with full context for quick fixes
+5. **Alerts** tell you when users are affected, before they call you
+
+---
+
+## Production Checklist
+
+- [ ] Structured JSON logging in production
+- [ ] Request correlation IDs on all logs
+- [ ] No sensitive data in logs (passwords, tokens, PII)
+- [ ] Prometheus metrics exposed at `/metrics`
+- [ ] The four golden signals instrumented (latency, traffic, errors, saturation)
+- [ ] Grafana dashboards for all services
+- [ ] Error rate alert (p95 latency + 5xx rate)
+- [ ] On-call rotation configured (PagerDuty/OpsGenie)
+- [ ] All alerts have runbooks linked
+- [ ] Sentry (or equivalent) for error tracking
+- [ ] OpenTelemetry distributed tracing configured
+- [ ] SLOs defined and error budget tracked
+- [ ] Post-mortem process defined
+- [ ] Log retention policy (90 days minimum, 1 year for compliance)
+
+---
+
+*Previous: [Layer 11: Scaling →](../11-scaling/README.md) | Next: [Layer 13: Availability & Recovery →](../13-recovery/README.md)*

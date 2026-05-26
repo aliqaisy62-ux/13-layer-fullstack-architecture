@@ -1,0 +1,575 @@
+# Layer 9: Rate Limiting
+## Protecting Your API from Abuse, Overload, and Attacks
+
+> **Layer role:** Rate limiting controls how frequently clients can call your API. It protects against DDoS attacks, brute-force attempts, accidental API abuse, and runaway clients. Without rate limiting, a single misbehaving client can bring down your entire service.
+
+---
+
+## Table of Contents
+
+1. [Beginner Explanation](#beginner-explanation)
+2. [Why Rate Limiting Matters](#why-rate-limiting-matters)
+3. [Rate Limiting Algorithms](#rate-limiting-algorithms)
+4. [Implementation Strategies](#implementation-strategies)
+5. [Distributed Rate Limiting with Redis](#distributed-rate-limiting-with-redis)
+6. [Rate Limiting at Different Layers](#rate-limiting-at-different-layers)
+7. [Response Headers & Client Communication](#response-headers--client-communication)
+8. [Architecture Diagram](#architecture-diagram)
+9. [Common Mistakes](#common-mistakes)
+10. [Best Practices](#best-practices)
+11. [Interview-Level Insights](#interview-level-insights)
+12. [Summary](#summary)
+13. [Production Checklist](#production-checklist)
+
+---
+
+## Beginner Explanation
+
+Imagine a coffee shop with one barista. If 500 people simultaneously rush in and all shout their orders, the barista can't serve anyone well — chaos ensues. Rate limiting is like a number queue system: each customer gets a number, service happens in order, and a single customer can't cut in front of everyone 500 times.
+
+For APIs: if Twitter didn't rate limit, a single bot could make millions of requests per second, consuming all server resources, effectively taking Twitter down for everyone. Rate limiting ensures fair usage — everyone gets their share.
+
+---
+
+## Why Rate Limiting Matters
+
+```
+Without rate limiting, attackers can:
+
+1. Brute force attack passwords:
+   POST /login {email: victim@email.com, password: "password1"}
+   POST /login {email: victim@email.com, password: "password2"}
+   POST /login {email: victim@email.com, password: "password3"}
+   ... 10 million attempts per hour → break any weak password
+
+2. Scrape your entire database:
+   GET /api/users/1
+   GET /api/users/2
+   ... all 50 million users in a few hours
+
+3. DDoS via legitimate endpoints:
+   A competitor runs 1000 bots each making 1000 req/s
+   → 1,000,000 requests/second to your API
+   → Server crashes, legitimate users get nothing
+
+4. Exhaust paid resources:
+   GET /api/generate-image  (each call costs $0.04 from OpenAI)
+   10,000 calls → $400 bill before you notice
+```
+
+---
+
+## Rate Limiting Algorithms
+
+### 1. Fixed Window Counter
+
+```
+Window: 1 minute
+Limit: 100 requests per window
+
+Timeline:
+00:00 - 00:59  → counter=100 (limit hit at :59)
+01:00 - 01:59  → counter resets to 0
+
+Problem: Burst attack at window boundary
+00:59 → 100 requests (window 1 exhausted)
+01:00 → 100 requests (window 2 starts fresh)
+→ 200 requests in 2 seconds! Double the intended rate.
+```
+
+```typescript
+async function isFixedWindowAllowed(key: string, limit: number, windowSeconds: number): Promise<boolean> {
+  const window = Math.floor(Date.now() / 1000 / windowSeconds)
+  const redisKey = `ratelimit:fixed:${key}:${window}`
+
+  const count = await redis.incr(redisKey)
+  if (count === 1) {
+    await redis.expire(redisKey, windowSeconds)  // Set TTL on first increment
+  }
+
+  return count <= limit
+}
+```
+
+---
+
+### 2. Sliding Window Counter
+
+```
+Limit: 100 requests per minute (rolling)
+
+Current time: 1:00:30
+
+Window: 12:59:30 → 1:00:30 (last 60 seconds)
+
+Count requests in that dynamic window.
+No burst at boundary — the window moves continuously.
+```
+
+```typescript
+async function isSlidingWindowAllowed(key: string, limit: number, windowSeconds: number): Promise<boolean> {
+  const now = Date.now()
+  const windowStart = now - windowSeconds * 1000
+
+  const pipeline = redis.pipeline()
+
+  // Remove old entries outside the window
+  pipeline.zremrangebyscore(`ratelimit:sliding:${key}`, '-inf', windowStart)
+
+  // Add current request with timestamp as score
+  pipeline.zadd(`ratelimit:sliding:${key}`, now, `${now}-${crypto.randomUUID()}`)
+
+  // Count requests in window
+  pipeline.zcount(`ratelimit:sliding:${key}`, windowStart, '+inf')
+
+  // Set expiry (cleanup)
+  pipeline.expire(`ratelimit:sliding:${key}`, windowSeconds + 1)
+
+  const results = await pipeline.exec()
+  const count = results[2][1] as number
+
+  return count <= limit
+}
+```
+
+---
+
+### 3. Token Bucket (Most Production-Friendly)
+
+```
+Concept:
+  - Bucket holds N tokens
+  - Each request consumes 1 token
+  - Tokens refill at rate R per second
+  - If bucket empty → reject request
+
+Example: 100 tokens, refill 10/second
+
+Burst handling:
+  - User can burst 100 requests instantly (uses all tokens)
+  - Then limited to 10 requests/second (refill rate)
+  - If idle for 10 seconds → full bucket (100 tokens) again
+
+Benefits:
+  - Allows natural bursting (loading a page = multiple requests)
+  - Smooth long-term rate
+  - Simple to understand
+```
+
+```typescript
+interface TokenBucketState {
+  tokens: number
+  lastRefill: number  // Unix timestamp in ms
+}
+
+async function isTokenBucketAllowed(
+  key: string,
+  capacity: number,
+  refillRate: number,  // tokens per second
+): Promise<{ allowed: boolean; remainingTokens: number }> {
+  const now = Date.now()
+  const redisKey = `ratelimit:bucket:${key}`
+
+  // Lua script — atomic operation (no race conditions)
+  const script = `
+    local key = KEYS[1]
+    local capacity = tonumber(ARGV[1])
+    local refill_rate = tonumber(ARGV[2])
+    local now = tonumber(ARGV[3])
+
+    local bucket = redis.call('HMGET', key, 'tokens', 'last_refill')
+    local tokens = tonumber(bucket[1]) or capacity
+    local last_refill = tonumber(bucket[2]) or now
+
+    -- Calculate tokens to add based on elapsed time
+    local elapsed = (now - last_refill) / 1000  -- seconds
+    local refilled = elapsed * refill_rate
+    tokens = math.min(capacity, tokens + refilled)
+
+    local allowed = 0
+    if tokens >= 1 then
+      tokens = tokens - 1
+      allowed = 1
+    end
+
+    redis.call('HMSET', key, 'tokens', tokens, 'last_refill', now)
+    redis.call('EXPIRE', key, 3600)
+
+    return {allowed, math.floor(tokens)}
+  `
+
+  const result = await redis.eval(script, 1, redisKey, capacity, refillRate, now)
+  const [allowed, remainingTokens] = result as [number, number]
+
+  return { allowed: allowed === 1, remainingTokens }
+}
+```
+
+---
+
+### 4. Leaky Bucket
+
+```
+Concept:
+  - Requests pour into a queue (bucket)
+  - Requests processed at a fixed rate (leak)
+  - If bucket overflows → reject
+
+Used for: smoothing out bursty traffic to a uniform rate
+  - All requests processed at exactly the same rate
+  - No bursting allowed (different from token bucket)
+  
+Use case: sending emails, payment processing (exact rate control)
+```
+
+---
+
+### Algorithm Comparison
+
+| Algorithm | Burst Handling | Smoothness | Complexity | Best For |
+|-----------|---------------|-----------|-----------|---------|
+| Fixed Window | Poor (boundary burst) | Low | Very low | Simple protection |
+| Sliding Window | Good | High | Medium | API rate limiting |
+| Token Bucket | Excellent | Medium | Medium | API with burst allowance |
+| Leaky Bucket | None (smooths bursts) | Perfect | Medium | Payment, email send |
+
+---
+
+## Implementation Strategies
+
+### Express Middleware
+
+```typescript
+import rateLimit from 'express-rate-limit'
+import RedisStore from 'rate-limit-redis'
+
+// ── Global limit — baseline protection
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,  // 15 minutes
+  max: 1000,                  // 1000 requests per 15 min per IP
+  store: new RedisStore({
+    sendCommand: (...args) => redis.sendCommand(args),
+  }),
+  message: { error: 'Too many requests', retryAfter: 'X-RateLimit-Reset' },
+  standardHeaders: true,   // Include X-RateLimit-* headers
+  legacyHeaders: false,
+})
+
+// ── Auth endpoints — strict
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,       // 5 login attempts per 15 minutes per IP
+  skipSuccessfulRequests: true,  // Only count failed attempts
+  message: { error: 'Too many login attempts. Try again in 15 minutes.' },
+})
+
+// ── Expensive endpoints — per user, not per IP
+const searchLimiter = rateLimit({
+  windowMs: 60 * 1000,   // 1 minute
+  max: 30,                // 30 searches per minute
+  keyGenerator: (req) => req.user?.id ?? req.ip,  // Per user when logged in
+  message: { error: 'Search rate limit exceeded. Max 30 searches/minute.' },
+})
+
+// ── API tier limits based on subscription
+const tieredLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,  // Default: 60 req/min
+  keyGenerator: (req) => req.user?.id ?? req.ip,
+  skip: (req) => req.user?.plan === 'enterprise',  // No limit for enterprise
+  handler: async (req, res) => {
+    const limit = await getApiLimit(req.user?.plan)
+    res.status(429).json({
+      error: 'Rate limit exceeded',
+      limit,
+      plan: req.user?.plan ?? 'free',
+      upgradeUrl: 'https://example.com/pricing',
+    })
+  }
+})
+
+app.use(globalLimiter)
+app.post('/auth/login', authLimiter, loginHandler)
+app.get('/api/search', requireAuth, searchLimiter, searchHandler)
+```
+
+---
+
+## Distributed Rate Limiting with Redis
+
+When running multiple API servers, in-memory rate limiting doesn't work — each server has a separate counter.
+
+```mermaid
+graph TB
+    subgraph BAD["❌ In-Memory (Per Server)"]
+        U[User 100 req/min] --> LB1[Load Balancer]
+        LB1 -->|50 req| S1[Server 1\nCounter: 50/100 ✅]
+        LB1 -->|50 req| S2[Server 2\nCounter: 50/100 ✅]
+        NOTE1[User sent 100 req total\nbut each server says it's OK!\nEffective limit: 200 req/min ❌]
+    end
+
+    subgraph GOOD["✅ Redis (Shared Counter)"]
+        U2[User 100 req/min] --> LB2[Load Balancer]
+        LB2 -->|50 req| S3[Server 3]
+        LB2 -->|50 req| S4[Server 4]
+        S3 & S4 --> REDIS[(Redis\nShared Counter: 100/100)]
+        NOTE2[51st request → 429 regardless\nof which server handles it ✅]
+    end
+
+    style BAD fill:#fee2e2
+    style GOOD fill:#dcfce7
+```
+
+---
+
+## Rate Limiting at Different Layers
+
+```mermaid
+graph TB
+    subgraph L1["Layer 1: DNS / Edge"]
+        CF[Cloudflare Rate Limiting\nGeographic · ASN-based · Global DDoS]
+    end
+
+    subgraph L2["Layer 2: API Gateway / Load Balancer"]
+        NGINX[NGINX limit_req\nAWS API Gateway throttling]
+    end
+
+    subgraph L3["Layer 3: Application Middleware"]
+        MW[express-rate-limit\nPer-IP · Per-user · Per-endpoint]
+    end
+
+    subgraph L4["Layer 4: Business Logic"]
+        BIZ[Custom limits\nPer API plan · Per operation cost]
+    end
+
+    INTERNET[Internet] --> CF --> NGINX --> MW --> BIZ --> APP[Application]
+
+    style L1 fill:#fee2e2
+    style L2 fill:#fef9c3
+    style L3 fill:#dcfce7
+    style L4 fill:#dbeafe
+```
+
+**Cloudflare rate limiting (edge):**
+```
+Rules:
+  - If > 10,000 requests/minute from single IP → challenge with CAPTCHA
+  - If > 50,000 requests/minute from single IP → block for 24 hours
+  - Known bot lists → block by default
+
+Benefits:
+  - Blocks before traffic even reaches your servers
+  - Handles volumetric DDoS (terabits per second)
+  - Global BGP anycast absorbs traffic closest to attacker
+```
+
+---
+
+## Response Headers & Client Communication
+
+Well-behaved API clients need to know their rate limit status to back off gracefully.
+
+```http
+HTTP/1.1 200 OK
+X-RateLimit-Limit: 100
+X-RateLimit-Remaining: 73
+X-RateLimit-Reset: 1705312900
+X-RateLimit-Policy: 100;w=60
+
+HTTP/1.1 429 Too Many Requests
+X-RateLimit-Limit: 100
+X-RateLimit-Remaining: 0
+X-RateLimit-Reset: 1705312900
+Retry-After: 47
+Content-Type: application/json
+
+{
+  "error": "Rate limit exceeded",
+  "limit": 100,
+  "window": "60s",
+  "retryAfter": 47,
+  "upgradeUrl": "https://example.com/pricing"
+}
+```
+
+```typescript
+// Exponential backoff in the client
+async function apiCallWithRetry(url: string, options: RequestInit, maxRetries = 3) {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const response = await fetch(url, options)
+
+    if (response.status === 429) {
+      const retryAfter = response.headers.get('Retry-After')
+      const waitMs = retryAfter
+        ? parseInt(retryAfter) * 1000
+        : Math.pow(2, attempt) * 1000 + Math.random() * 1000  // Exponential + jitter
+
+      console.warn(`Rate limited. Waiting ${waitMs}ms before retry`)
+      await new Promise(resolve => setTimeout(resolve, waitMs))
+      continue
+    }
+
+    return response
+  }
+  throw new Error('Max retries exceeded')
+}
+```
+
+---
+
+## Architecture Diagram
+
+```mermaid
+graph TB
+    subgraph Traffic["Incoming Traffic"]
+        BOT[🤖 Bot / Attacker]
+        LEGIT[👤 Legitimate User]
+    end
+
+    subgraph Edge["🌐 Edge - Cloudflare"]
+        DDOS_PROT[DDoS Mitigation\nL3/L4 + L7]
+        GEO_BLOCK[Geo Blocking\nSanctioned countries]
+        IP_REPUT[IP Reputation\nKnown bad actors]
+    end
+
+    subgraph API_GW["🚦 API Gateway"]
+        GLOBAL_RL[Global: 1000/15min per IP]
+        AUTH_RL[Auth: 5/15min per IP]
+        SEARCH_RL[Search: 30/min per user]
+    end
+
+    subgraph Redis["⚡ Redis Cluster"]
+        COUNTERS[Rate limit counters\nShared across all API servers]
+    end
+
+    subgraph Apps["⚙️ API Servers"]
+        APP1[Server 1]
+        APP2[Server 2]
+        APP3[Server 3]
+    end
+
+    BOT --> DDOS_PROT -->|Blocked| DEV_NULL[/dev/null ❌]
+    LEGIT --> Edge
+    Edge --> API_GW
+    API_GW <--> COUNTERS
+    API_GW -->|Within limit| Apps
+
+    style Edge fill:#fee2e2
+    style API_GW fill:#fef9c3
+    style Redis fill:#dcfce7
+    style Apps fill:#dbeafe
+```
+
+---
+
+## Common Mistakes
+
+### 1. Rate Limiting by IP Only Behind a Proxy
+```typescript
+// ❌ If behind load balancer/proxy, req.ip is always the proxy's IP
+// → All users share one rate limit bucket!
+app.use(rateLimit({ keyGenerator: req => req.ip }))
+
+// ✅ Configure trust proxy + use forwarded IP
+app.set('trust proxy', 1)  // Trust first proxy hop
+app.use(rateLimit({
+  keyGenerator: req => {
+    // Use logged-in user ID when available (more accurate)
+    if (req.user?.id) return `user:${req.user.id}`
+    // Fall back to real IP from X-Forwarded-For
+    return req.ip
+  }
+}))
+```
+
+### 2. Same Limit for All Endpoints
+```typescript
+// ❌ Generous limit on expensive endpoints
+app.use(rateLimit({ max: 1000 }))
+// GET /api/ping — very cheap, 1000 is fine
+// POST /api/send-email — calls Mailgun, costs money, needs strict limit
+// GET /api/export-csv — scans entire DB, needs very strict limit
+
+// ✅ Per-endpoint limits based on cost
+app.get('/api/ping', globalLimiter)
+app.post('/api/send-email', strictLimiter)     // 5/hour
+app.get('/api/export-csv', veryStrictLimiter)  // 2/day
+```
+
+### 3. No Distinction Between Authenticated and Anonymous
+```typescript
+// ❌ Same limit for anonymous and paying customers
+app.use(rateLimit({ max: 60 }))
+
+// ✅ Tiered limits based on authentication/subscription
+const dynamicLimiter = rateLimit({
+  max: (req) => {
+    if (!req.user) return 20          // Anonymous: 20/min
+    if (req.user.plan === 'free') return 60     // Free: 60/min
+    if (req.user.plan === 'pro') return 300     // Pro: 300/min
+    if (req.user.plan === 'enterprise') return Infinity  // Enterprise: unlimited
+    return 60
+  }
+})
+```
+
+---
+
+## Best Practices
+
+1. **Layer your defenses** — Edge (Cloudflare) → API Gateway → Application. Not just one layer.
+2. **Use Redis for distributed rate limiting** — In-memory counters don't work across multiple servers.
+3. **Communicate clearly to clients** — Return 429 with `Retry-After` and `X-RateLimit-*` headers.
+4. **Different limits for different endpoints** — Auth endpoints tightest, static reads loosest.
+5. **Monitor and alert** — High 429 rate = potential attack or misconfigured client.
+6. **Allowlist trusted internal services** — Your own worker processes shouldn't be rate limited.
+
+---
+
+## Interview-Level Insights
+
+### Q: Design a rate limiter that works across 100 API servers.
+
+**A:** Use Redis with a Lua script for atomic operations. The Lua script ensures the read-modify-write cycle is atomic without distributed locking overhead.
+
+Key design decisions:
+- **Algorithm:** Token bucket or sliding window counter
+- **Key:** `ratelimit:{userId}:{endpoint}:{window}` or just `ratelimit:{userId}`
+- **Atomicity:** Redis Lua scripts or MULTI/EXEC transactions
+- **Failure mode:** If Redis is down, fail open (allow requests) or fail closed (reject)? Most choose fail open to prefer availability over perfect rate limiting.
+- **Storage:** TTL expires old keys automatically — no cleanup needed
+
+For global DDoS protection, move rate limiting to the CDN edge (Cloudflare) — it can absorb millions of requests per second before they reach your origin.
+
+---
+
+## Summary
+
+Rate limiting is essential protection for every production API. Key principles:
+
+1. **Token bucket** for most APIs — allows natural bursting, limits long-term rate
+2. **Sliding window** for stricter auth endpoints
+3. **Redis** for distributed counting across all servers
+4. **Layer defenses** — edge + gateway + application
+5. **Communicate clearly** — clients need retry-after to behave properly
+6. **Differentiate users** — free vs paid vs unauthenticated should have different limits
+
+---
+
+## Production Checklist
+
+- [ ] Global rate limit on all API endpoints
+- [ ] Strict rate limit on auth endpoints (login, register, password reset)
+- [ ] Stricter limits on expensive operations (email, export, AI)
+- [ ] Redis-based distributed rate limiting (not in-memory)
+- [ ] Trust proxy configured correctly for real IP detection
+- [ ] Tiered limits: anonymous < free < pro < enterprise
+- [ ] 429 responses include `Retry-After` and `X-RateLimit-*` headers
+- [ ] Rate limit metrics dashboarded (Grafana)
+- [ ] Alert when 429 rate exceeds threshold (potential attack)
+- [ ] Cloudflare or AWS WAF for edge-level DDoS protection
+- [ ] Internal services and health check IPs allowlisted
+
+---
+
+*Previous: [Layer 8: Security →](../08-security/README.md) | Next: [Layer 10: Caching & CDN →](../10-caching/README.md)*

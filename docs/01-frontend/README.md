@@ -1,0 +1,975 @@
+# Layer 1: Frontend
+## The Interface Between Humans and Software
+
+> **Layer role:** The frontend is what users see and interact with. It renders the UI, manages user interactions, handles client-side state, and communicates with backend APIs. It is the first layer a user touches — and the last one they judge your product by.
+
+---
+
+## Table of Contents
+
+1. [Beginner Explanation](#beginner-explanation)
+2. [Layer Overview](#layer-overview)
+3. [Core Responsibilities](#core-responsibilities)
+4. [Rendering Strategies](#rendering-strategies)
+5. [Component Architecture](#component-architecture)
+6. [State Management](#state-management)
+7. [Client-Server Communication](#client-server-communication)
+8. [Performance Optimization](#performance-optimization)
+9. [Frontend Security](#frontend-security)
+10. [Accessibility & Responsive Design](#accessibility--responsive-design)
+11. [Common Technologies](#common-technologies)
+12. [Real-World Example](#real-world-example-how-instagram-renders-your-feed)
+13. [Architecture Diagram](#architecture-diagram)
+14. [Common Mistakes](#common-mistakes)
+15. [Best Practices](#best-practices)
+16. [Interview-Level Insights](#interview-level-insights)
+17. [Advanced Production Concepts](#advanced-production-concepts)
+18. [Summary](#summary)
+19. [Production Checklist](#production-checklist)
+20. [Recommended Resources](#recommended-resources)
+
+---
+
+## Beginner Explanation
+
+Imagine a restaurant. The **frontend** is the dining room — it's what customers (users) see and experience. The menu, the tables, the lighting. When a customer places an order, the waiter (the API call) takes it to the kitchen (the backend). The dining room doesn't cook food — it just presents it beautifully.
+
+In software terms: a frontend is a program that runs in the user's **browser** (or phone app). It's built with HTML, CSS, and JavaScript. When you visit Twitter, your browser downloads the Twitter frontend code and runs it locally. That code then talks to Twitter's servers to fetch your feed.
+
+**Key insight for beginners:** The frontend is *your code running on someone else's machine* — the user's browser. This is why frontend security is so important. You cannot trust anything that comes from the browser.
+
+---
+
+## Layer Overview
+
+| Attribute | Detail |
+|-----------|--------|
+| **Where it runs** | User's browser, mobile device, or desktop app |
+| **Languages** | HTML, CSS, JavaScript, TypeScript |
+| **Primary job** | Render UI, handle user interaction, call APIs |
+| **Communicates with** | Layer 2 (Backend APIs) via HTTP/WebSocket |
+| **Performance metric** | Core Web Vitals (LCP, FID, CLS) |
+| **Security threat** | XSS, CSRF, sensitive data exposure |
+
+---
+
+## Core Responsibilities
+
+```
+Frontend Responsibilities
+│
+├── 1. Rendering
+│       Converts data (JSON from API) into HTML/CSS visuals
+│
+├── 2. User Interaction Handling
+│       Button clicks, form submissions, keyboard events
+│
+├── 3. Routing
+│       Navigating between pages without full page reload
+│
+├── 4. State Management
+│       Keeping track of logged-in user, cart items, UI state
+│
+├── 5. API Communication
+│       Fetching and sending data to backend services
+│
+├── 6. Form Validation
+│       Client-side checks before sending to server
+│
+├── 7. Authentication UI
+│       Login forms, token storage, logout flows
+│
+├── 8. Error Handling
+│       Showing user-friendly messages for API failures
+│
+└── 9. Performance
+        Lazy loading, code splitting, image optimization
+```
+
+---
+
+## Rendering Strategies
+
+This is one of the most misunderstood topics in frontend development. There are four main rendering strategies. Choosing the right one is a critical architecture decision.
+
+### 1. Client-Side Rendering (CSR)
+
+**What it is:** The browser downloads an almost-empty HTML file and a large JavaScript bundle. JavaScript runs in the browser and builds the DOM.
+
+```mermaid
+sequenceDiagram
+    participant Browser
+    participant CDN
+    participant API
+
+    Browser->>CDN: GET /index.html
+    CDN-->>Browser: Empty HTML shell + <script> tags
+    Browser->>CDN: GET /bundle.js (2MB)
+    CDN-->>Browser: JavaScript bundle
+    Browser->>Browser: Execute JS, render UI (blank screen until here)
+    Browser->>API: GET /api/user/feed
+    API-->>Browser: JSON data
+    Browser->>Browser: Render feed content
+    Note over Browser: First meaningful paint: ~3-4 seconds
+```
+
+**When to use:** Dashboards, admin tools, authenticated apps that don't need SEO.
+
+**Pros:** Simple to deploy (static files), rich interactivity, fast after initial load.
+
+**Cons:** Poor SEO (search crawlers see empty HTML), slow Time to First Byte, large initial bundle.
+
+**Examples:** Create React App (classic), single-page dashboards, internal tools.
+
+---
+
+### 2. Server-Side Rendering (SSR)
+
+**What it is:** The server generates a complete HTML page for every request. The browser receives fully rendered HTML immediately.
+
+```mermaid
+sequenceDiagram
+    participant Browser
+    participant Server
+    participant DB
+
+    Browser->>Server: GET /feed
+    Server->>DB: SELECT posts WHERE user_id=...
+    DB-->>Server: Post data
+    Server->>Server: Render React components to HTML string
+    Server-->>Browser: Complete HTML (instantly visible)
+    Browser->>Server: GET /bundle.js (hydration)
+    Server-->>Browser: JS bundle
+    Browser->>Browser: Hydrate — attach event handlers
+    Note over Browser: First meaningful paint: ~0.5 seconds
+```
+
+**When to use:** Public-facing pages, e-commerce product pages, news articles, any page that needs SEO.
+
+**Pros:** Excellent SEO, fast initial paint, good for content-heavy sites.
+
+**Cons:** Every request hits your server, higher server cost, more complex caching strategy.
+
+**Examples:** Next.js with `getServerSideProps`, Nuxt.js, Remix.
+
+---
+
+### 3. Static Site Generation (SSG)
+
+**What it is:** At **build time** (not request time), all pages are pre-rendered to HTML files. These static files are served directly from a CDN.
+
+```mermaid
+graph LR
+    subgraph Build_Time["🏗️ Build Time (once)"]
+        CODE[Source Code] --> BUILD[Build Process]
+        CMS[CMS/Markdown] --> BUILD
+        BUILD --> HTML[Static HTML Files]
+        BUILD --> CSS[CSS Files]
+        BUILD --> JS[JS Files]
+    end
+
+    subgraph Runtime["⚡ Runtime (every request)"]
+        USER[User Request] --> CDN[CDN Edge Node]
+        HTML --> CDN
+        CDN --> BROWSER[Browser]
+    end
+```
+
+**When to use:** Blogs, marketing sites, documentation, anything with content that doesn't change per-user.
+
+**Pros:** Blazing fast (CDN-served), ultra-cheap hosting, excellent SEO, scales to millions of requests for free.
+
+**Cons:** Can't show user-specific content without client-side JS, slow rebuilds for large sites.
+
+**Examples:** Next.js `getStaticProps`, Gatsby, Astro, Hugo, Jekyll.
+
+---
+
+### 4. Incremental Static Regeneration (ISR)
+
+A hybrid of SSG and SSR. Pages are pre-generated but can be automatically regenerated on a schedule or on-demand. Next.js pioneered this pattern.
+
+```javascript
+// Next.js ISR example
+export async function getStaticProps() {
+  const data = await fetchProductData()
+  return {
+    props: { data },
+    revalidate: 60, // Regenerate this page at most every 60 seconds
+  }
+}
+```
+
+**When to use:** E-commerce product pages, news sites, any content that changes but not per-request.
+
+---
+
+### Rendering Strategy Comparison
+
+| Strategy | SEO | Speed | Server Cost | User-Specific Content | Use Case |
+|----------|-----|-------|-------------|----------------------|----------|
+| CSR | ❌ Poor | Medium | Low | ✅ Yes | Dashboards, SaaS apps |
+| SSR | ✅ Excellent | Fast initial | High | ✅ Yes | E-commerce, social feeds |
+| SSG | ✅ Excellent | Fastest | Near zero | ❌ No (without JS) | Blogs, docs, marketing |
+| ISR | ✅ Excellent | Fast | Low | ❌ No (without JS) | News, product catalogs |
+
+---
+
+## Component Architecture
+
+Modern frontends are built as **trees of components**. Each component is a self-contained piece of UI with its own data (state) and appearance (render).
+
+```
+App Component (root)
+├── Header
+│   ├── Logo
+│   ├── Navigation
+│   │   ├── NavLink (Home)
+│   │   ├── NavLink (Feed)
+│   │   └── NavLink (Profile)
+│   └── UserMenu
+│       ├── Avatar
+│       └── DropdownMenu
+├── MainContent
+│   ├── Sidebar
+│   └── FeedList
+│       ├── FeedItem (post 1)
+│       │   ├── Avatar
+│       │   ├── PostContent
+│       │   └── ReactionBar
+│       └── FeedItem (post 2)
+└── Footer
+```
+
+### Component Principles
+
+**1. Single Responsibility**
+Each component does one thing. A `Button` component renders a button. It doesn't also fetch data.
+
+**2. Props Down, Events Up**
+Data flows down the component tree via props. User interactions flow back up via callback functions (events).
+
+```jsx
+// Parent passes data DOWN via props
+// Parent passes handler DOWN via props (events flow UP when called)
+function FeedPage() {
+  const [posts, setPosts] = useState([])
+
+  const handleLike = (postId) => {
+    // Called when child triggers the event
+    likePost(postId)
+  }
+
+  return <PostList posts={posts} onLike={handleLike} />
+}
+
+// Child receives props and calls the event handler
+function PostList({ posts, onLike }) {
+  return posts.map(post =>
+    <PostCard key={post.id} post={post} onLike={onLike} />
+  )
+}
+```
+
+**3. Composition over Inheritance**
+Build complex UI from small, reusable components rather than extending base classes.
+
+---
+
+## State Management
+
+State is any data that can change over time and affects what the UI shows. Managing state correctly is one of the hardest parts of frontend engineering.
+
+### Types of State
+
+| State Type | What It Is | Where to Store |
+|-----------|-----------|----------------|
+| **Local UI state** | Is this dropdown open? | Component `useState` |
+| **Server state** | User's posts from the API | React Query / SWR |
+| **Global client state** | Logged-in user, theme | Context API / Redux / Zustand |
+| **URL state** | Current page, search filters | URL params / router |
+| **Form state** | Input values before submit | React Hook Form |
+
+### State Management Libraries
+
+```mermaid
+graph TD
+    NEED[State Management Need] --> LOCAL{Local to component?}
+    LOCAL -- Yes --> USESTATE[useState / useReducer]
+    LOCAL -- No --> SERVER{Is it server data?}
+    SERVER -- Yes --> REACTQUERY[React Query / SWR / TanStack Query]
+    SERVER -- No --> GLOBAL{How complex?}
+    GLOBAL -- Simple --> CONTEXT[React Context API]
+    GLOBAL -- Complex --> ZUSTAND[Zustand / Jotai]
+    GLOBAL -- Enterprise --> REDUX[Redux Toolkit]
+```
+
+### React Query Example (Server State — Best Practice)
+
+```typescript
+// Fetch and cache server data with automatic refetching, loading, and error states
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+
+function UserProfile({ userId }: { userId: string }) {
+  const queryClient = useQueryClient()
+
+  // Fetch user data — automatically cached, refetched on focus
+  const { data: user, isLoading, error } = useQuery({
+    queryKey: ['user', userId],
+    queryFn: () => fetch(`/api/users/${userId}`).then(r => r.json()),
+    staleTime: 5 * 60 * 1000, // Consider data fresh for 5 minutes
+  })
+
+  // Mutation — automatically invalidates the cache on success
+  const updateMutation = useMutation({
+    mutationFn: (data) => fetch(`/api/users/${userId}`, {
+      method: 'PUT',
+      body: JSON.stringify(data)
+    }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['user', userId] })
+    }
+  })
+
+  if (isLoading) return <Skeleton />
+  if (error) return <ErrorState message={error.message} />
+  return <ProfileCard user={user} onUpdate={updateMutation.mutate} />
+}
+```
+
+---
+
+## Client-Server Communication
+
+The frontend communicates with the backend through well-defined interfaces.
+
+### REST API Calls
+
+```typescript
+// Typed API client — production pattern
+const api = {
+  async getUser(id: string): Promise<User> {
+    const res = await fetch(`/api/users/${id}`, {
+      headers: {
+        'Authorization': `Bearer ${getToken()}`,
+        'Content-Type': 'application/json',
+      },
+    })
+    if (!res.ok) throw new ApiError(res.status, await res.json())
+    return res.json()
+  },
+
+  async createPost(data: CreatePostInput): Promise<Post> {
+    const res = await fetch('/api/posts', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${getToken()}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(data),
+    })
+    if (!res.ok) throw new ApiError(res.status, await res.json())
+    return res.json()
+  }
+}
+```
+
+### GraphQL
+
+```typescript
+// GraphQL query — request only the fields you need
+const GET_USER_FEED = gql`
+  query GetUserFeed($userId: ID!, $limit: Int!) {
+    user(id: $userId) {
+      id
+      name
+      avatar
+      feed(limit: $limit) {
+        id
+        content
+        createdAt
+        likeCount
+        author {
+          id
+          name
+          avatar
+        }
+      }
+    }
+  }
+`
+
+function Feed({ userId }) {
+  const { data, loading } = useQuery(GET_USER_FEED, {
+    variables: { userId, limit: 20 }
+  })
+  // ...
+}
+```
+
+### WebSockets (Real-time)
+
+```typescript
+// Real-time communication for chat, notifications, live data
+import { io } from 'socket.io-client'
+
+const socket = io('wss://api.example.com', {
+  auth: { token: getToken() }
+})
+
+socket.on('message', (message: Message) => {
+  setMessages(prev => [...prev, message])
+})
+
+socket.on('notification', (notification: Notification) => {
+  showToast(notification.text)
+})
+
+// Send a message
+socket.emit('send_message', { roomId: '123', content: 'Hello!' })
+```
+
+---
+
+## Performance Optimization
+
+Performance is not optional at scale. Every 100ms of latency costs conversions.
+
+### Core Web Vitals
+
+| Metric | What It Measures | Good Score | How to Improve |
+|--------|-----------------|-----------|----------------|
+| **LCP** (Largest Contentful Paint) | How fast main content loads | < 2.5s | Optimize images, preload key assets |
+| **FID** (First Input Delay) | How fast app responds to interaction | < 100ms | Reduce JS execution, code split |
+| **CLS** (Cumulative Layout Shift) | How much layout jumps | < 0.1 | Reserve space for async content |
+| **INP** (Interaction to Next Paint) | Responsiveness to all interactions | < 200ms | Virtualize lists, defer non-critical work |
+
+### Code Splitting
+
+```javascript
+// Instead of loading everything upfront, split by route
+import { lazy, Suspense } from 'react'
+
+const Dashboard = lazy(() => import('./pages/Dashboard'))
+const Settings = lazy(() => import('./pages/Settings'))
+const AdminPanel = lazy(() => import('./pages/AdminPanel')) // Only admins see this
+
+function App() {
+  return (
+    <Suspense fallback={<LoadingSpinner />}>
+      <Routes>
+        <Route path="/dashboard" element={<Dashboard />} />
+        <Route path="/settings" element={<Settings />} />
+        <Route path="/admin" element={<AdminPanel />} />
+      </Routes>
+    </Suspense>
+  )
+}
+```
+
+### Image Optimization
+
+```jsx
+// Next.js automatic image optimization
+import Image from 'next/image'
+
+// Bad — raw <img> tag
+<img src="/hero.jpg" width="1200" height="600" />
+
+// Good — Next.js Image component
+// Automatically: WebP conversion, lazy loading, responsive srcset, blur placeholder
+<Image
+  src="/hero.jpg"
+  width={1200}
+  height={600}
+  priority={true}          // Load eagerly for above-the-fold
+  placeholder="blur"       // Show blurred placeholder while loading
+  blurDataURL={blurUrl}
+  alt="Hero image"
+/>
+```
+
+### Virtualization for Long Lists
+
+```typescript
+// Rendering 10,000 rows crashes browsers. Virtualization renders only visible rows.
+import { FixedSizeList as List } from 'react-window'
+
+function MessageList({ messages }: { messages: Message[] }) {
+  return (
+    <List
+      height={600}
+      itemCount={messages.length}
+      itemSize={80}        // Each row is 80px tall
+      width="100%"
+    >
+      {({ index, style }) => (
+        <div style={style}>
+          <MessageRow message={messages[index]} />
+        </div>
+      )}
+    </List>
+  )
+}
+```
+
+---
+
+## Frontend Security
+
+Frontend security is about protecting users, not the server. The key insight: **never trust the frontend**. The backend always validates everything.
+
+### XSS (Cross-Site Scripting) Prevention
+
+```jsx
+// DANGEROUS — Never inject raw user content as HTML
+<div dangerouslySetInnerHTML={{ __html: userComment }} />
+
+// SAFE — React escapes strings automatically
+<div>{userComment}</div>
+
+// If you MUST render HTML (e.g., rich text editor output):
+import DOMPurify from 'dompurify'
+<div dangerouslySetInnerHTML={{
+  __html: DOMPurify.sanitize(userComment, { ALLOWED_TAGS: ['b', 'i', 'em', 'strong'] })
+}} />
+```
+
+### Token Storage
+
+```typescript
+// Option A: localStorage — convenient but vulnerable to XSS
+localStorage.setItem('token', jwt)  // ⚠️ Any script on the page can read this
+
+// Option B: Secure httpOnly cookies — XSS-resistant
+// The cookie is set by the server and NOT accessible to JavaScript
+// Server sets: Set-Cookie: token=xxx; HttpOnly; Secure; SameSite=Strict
+
+// Option C: In-memory — safest but lost on refresh
+let tokenInMemory: string | null = null
+```
+
+### Content Security Policy (CSP)
+
+```html
+<!-- Prevent loading scripts from untrusted sources -->
+<meta http-equiv="Content-Security-Policy"
+  content="
+    default-src 'self';
+    script-src 'self' 'nonce-RANDOM123';
+    style-src 'self' https://fonts.googleapis.com;
+    img-src 'self' https://cdn.example.com data:;
+    connect-src 'self' https://api.example.com wss://realtime.example.com;
+    font-src 'self' https://fonts.gstatic.com;
+    frame-ancestors 'none';
+  "
+/>
+```
+
+---
+
+## Accessibility & Responsive Design
+
+### Semantic HTML
+
+```jsx
+// Bad — no semantic meaning
+<div onClick={handleSubmit} className="btn">Submit</div>
+
+// Good — semantic, keyboard accessible, screen reader compatible
+<button type="submit" aria-label="Submit payment form">Submit</button>
+
+// Good — landmark regions
+<main>
+  <article>
+    <header><h1>Post Title</h1></header>
+    <section aria-label="Post content">
+      <p>Content...</p>
+    </section>
+    <footer>
+      <time dateTime="2024-01-15">January 15, 2024</time>
+    </footer>
+  </article>
+</main>
+```
+
+### Responsive Design with Tailwind CSS
+
+```jsx
+// Mobile-first responsive design
+<div className="
+  grid
+  grid-cols-1          /* 1 column on mobile */
+  sm:grid-cols-2       /* 2 columns on tablet */
+  lg:grid-cols-3       /* 3 columns on desktop */
+  xl:grid-cols-4       /* 4 columns on large screen */
+  gap-4
+  p-4
+  sm:p-8
+">
+  {posts.map(post => <PostCard key={post.id} post={post} />)}
+</div>
+```
+
+---
+
+## Common Technologies
+
+### Framework Comparison
+
+| Framework | Rendering | Learning Curve | Best For | Company |
+|-----------|-----------|---------------|----------|---------|
+| **React** | CSR/SSR/SSG | Medium | General purpose, large ecosystem | Meta |
+| **Next.js** | CSR/SSR/SSG/ISR | Medium | Production full-stack apps | Vercel |
+| **Vue 3** | CSR/SSR | Easy | Progressive enhancement | Community |
+| **Nuxt 3** | CSR/SSR/SSG | Medium | Vue full-stack apps | Community |
+| **Angular** | CSR/SSR | Hard | Enterprise, large teams | Google |
+| **Remix** | SSR | Medium | Web standards, forms | Shopify |
+| **Astro** | SSG/SSR | Easy | Content-heavy sites | Community |
+| **SvelteKit** | CSR/SSR/SSG | Easy | Performance-critical apps | Community |
+
+### Styling Solutions
+
+| Solution | Approach | Bundle Size | DX | Performance |
+|----------|---------|------------|-----|------------|
+| **Tailwind CSS** | Utility classes | Small (purged) | Excellent | Excellent |
+| **CSS Modules** | Scoped CSS | Zero overhead | Good | Excellent |
+| **Styled Components** | CSS-in-JS | Larger | Good | Good |
+| **Emotion** | CSS-in-JS | Medium | Good | Good |
+| **Vanilla Extract** | Zero-runtime CSS-in-JS | Small | Good | Excellent |
+
+---
+
+## Real-World Example: How Instagram Renders Your Feed
+
+```mermaid
+sequenceDiagram
+    participant U as 📱 User's Phone
+    participant CDN as 🌐 Instagram CDN
+    participant API as ⚙️ Feed API
+    participant ML as 🤖 ML Ranking
+    participant MEDIA as 🖼️ Media Server
+
+    U->>CDN: App opens, request app bundle
+    CDN-->>U: Cached JS/CSS (if not expired)
+    U->>API: GET /api/v1/feed?cursor=null&limit=12
+    Note over API,ML: Feed is ranked by ML model
+    API->>ML: Get ranked post IDs for user
+    ML-->>API: Ordered post IDs + metadata
+    API-->>U: Feed JSON (text + media URLs)
+    U->>U: Render skeleton loaders immediately
+    loop For each visible post
+        U->>MEDIA: GET image/video (lazy)
+        MEDIA-->>U: Compressed media (WebP/HEVC)
+        U->>U: Replace skeleton with real content
+    end
+    Note over U: Infinite scroll — repeat on scroll
+```
+
+**What Instagram does well:**
+- Skeleton screens make it feel fast even when waiting for data
+- Images load lazily (only when about to enter viewport)
+- Videos auto-play only when 50% visible using IntersectionObserver
+- Feed data is prefetched 2 pages ahead while user reads current page
+- React Native for mobile allows 90% code sharing between iOS and Android
+
+---
+
+## Architecture Diagram
+
+```mermaid
+graph TB
+    subgraph Browser["🌐 Browser"]
+        HTML[HTML Document]
+        CSS[CSS Styles]
+        JS[JavaScript Runtime]
+        
+        subgraph React_App["React Application"]
+            ROUTER[React Router]
+            STORE[State Store - Zustand/Redux]
+            COMP[Component Tree]
+            QUERY[React Query - Server State]
+        end
+        
+        HTML --> JS
+        CSS --> COMP
+        JS --> React_App
+    end
+
+    subgraph Build["🏗️ Build Pipeline"]
+        SRC[Source Code .tsx .css]
+        WEBPACK[Vite / Webpack]
+        TYPES[TypeScript Compiler]
+        LINT[ESLint / Prettier]
+        
+        SRC --> TYPES
+        TYPES --> LINT
+        LINT --> WEBPACK
+    end
+
+    subgraph CDN["🌐 CDN"]
+        STATIC[Static Files]
+        EDGE[Edge Nodes - 200+ PoPs]
+        
+        WEBPACK --> STATIC
+        STATIC --> EDGE
+    end
+
+    subgraph Backend["⚙️ Backend"]
+        API_GW[API Gateway]
+        AUTH_SVC[Auth Service]
+        DATA_SVC[Data Services]
+    end
+
+    EDGE --> Browser
+    QUERY --> API_GW
+    API_GW --> AUTH_SVC
+    API_GW --> DATA_SVC
+
+    style Browser fill:#dbeafe,stroke:#2563eb
+    style Build fill:#dcfce7,stroke:#16a34a
+    style CDN fill:#fef9c3,stroke:#ca8a04
+    style Backend fill:#fce7f3,stroke:#db2777
+```
+
+---
+
+## Common Mistakes
+
+### 1. Storing Sensitive Data in localStorage
+```javascript
+// ❌ NEVER store these in localStorage
+localStorage.setItem('jwt_token', token)
+localStorage.setItem('user_password', password)
+localStorage.setItem('credit_card', cardNumber)
+
+// ✅ Use httpOnly cookies for auth tokens
+// ✅ Never store passwords client-side (ever)
+// ✅ Never handle raw payment data — use Stripe.js
+```
+
+### 2. Not Handling Loading and Error States
+```jsx
+// ❌ Naive — crashes if data is undefined, no loading feedback
+function UserCard({ userId }) {
+  const { data } = useQuery(['user', userId], fetchUser)
+  return <div>{data.name}</div>  // Error if data is undefined!
+}
+
+// ✅ Handle all states
+function UserCard({ userId }) {
+  const { data, isLoading, error } = useQuery(['user', userId], fetchUser)
+  if (isLoading) return <Skeleton className="h-12 w-full" />
+  if (error) return <Alert type="error">Failed to load user: {error.message}</Alert>
+  return <div>{data.name}</div>
+}
+```
+
+### 3. Prop Drilling
+```jsx
+// ❌ Passing props through 5 levels of components
+<App user={user}>
+  <Layout user={user}>
+    <Sidebar user={user}>
+      <UserMenu user={user}>   // only this needs the user!
+        <Avatar src={user.avatar} />
+      </UserMenu>
+    </Sidebar>
+  </Layout>
+</App>
+
+// ✅ Use context or a store for globally needed data
+const { user } = useUser()  // Available anywhere via context
+```
+
+### 4. Ignoring Bundle Size
+```bash
+# Analyze your bundle
+npx next build --analyze  # For Next.js
+npx webpack-bundle-analyzer
+
+# Check what you're importing
+# Bad: importing entire library for one function
+import _ from 'lodash'           // 70KB
+import moment from 'moment'       // 230KB
+
+# Good: tree-shakeable imports
+import debounce from 'lodash/debounce'   // 2KB
+import { format } from 'date-fns'        // 2KB
+```
+
+### 5. No Optimistic Updates
+```typescript
+// ❌ Shows stale data until server responds (feels slow)
+async function likePost(postId: string) {
+  await api.likePost(postId)
+  await refetchPosts()  // Wait ~300ms for server + refetch
+}
+
+// ✅ Update UI immediately, roll back if server fails
+const mutation = useMutation({
+  mutationFn: (postId: string) => api.likePost(postId),
+  onMutate: async (postId) => {
+    // Cancel in-flight queries
+    await queryClient.cancelQueries(['posts'])
+    // Snapshot current state for rollback
+    const prev = queryClient.getQueryData(['posts'])
+    // Optimistically update
+    queryClient.setQueryData(['posts'], old =>
+      old.map(p => p.id === postId ? { ...p, liked: true, likeCount: p.likeCount + 1 } : p)
+    )
+    return { prev }
+  },
+  onError: (err, postId, context) => {
+    // Roll back on failure
+    queryClient.setQueryData(['posts'], context.prev)
+  },
+})
+```
+
+---
+
+## Best Practices
+
+### Production Checklist for Frontend
+
+1. **Use TypeScript** — Catches entire classes of bugs at compile time. No exceptions for production apps.
+2. **Implement proper error boundaries** — Prevent one broken component from crashing the entire app.
+3. **Set up bundle analysis** — Know exactly what's in your JS bundle before deploying.
+4. **Lighthouse CI** — Run performance audits on every PR to catch regressions.
+5. **Environment variables** — Never hardcode API keys. Only expose `NEXT_PUBLIC_*` vars to the browser.
+6. **CSP headers** — Prevent XSS through Content Security Policy.
+7. **Sanitize user input** — Always sanitize before rendering as HTML.
+8. **Use HTTPS everywhere** — Including local dev (`localhost` is the exception).
+
+---
+
+## Interview-Level Insights
+
+### Q: What is hydration and why does it matter?
+
+**A:** Hydration is the process of attaching JavaScript event listeners to server-rendered HTML. In SSR, the server sends a complete HTML string. The browser renders it immediately (fast first paint). Then React's JavaScript loads and "hydrates" the static HTML — essentially reconciling the server-rendered DOM with React's virtual DOM and attaching event handlers.
+
+**The problem:** If the server HTML doesn't match what React would have rendered, React throws a hydration mismatch error and re-renders everything from scratch, negating the SSR benefit.
+
+**React 18 improvements:** Selective hydration — React can prioritize hydrating components the user is interacting with first.
+
+---
+
+### Q: When would you choose CSR over SSR?
+
+**A:** Choose CSR for: admin dashboards, SaaS apps behind login, tools where SEO doesn't matter, apps with highly dynamic user-specific content. Choose SSR for: marketing pages, e-commerce product pages, blogs, news sites — anywhere search crawlers need to index content or where perceived performance (time to first meaningful paint) is critical.
+
+---
+
+### Q: Explain the React reconciliation algorithm.
+
+**A:** React maintains a virtual DOM (a JavaScript representation of the actual DOM). When state changes, React creates a new virtual DOM tree and diffs it against the previous one (the "diffing" algorithm). Only the actual DOM nodes that changed are updated — this is far cheaper than re-rendering the whole page.
+
+Key insight: React assumes that elements of different types produce different trees (it doesn't try to reconcile them). That's why component `key` props matter in lists — without a stable key, React can't efficiently identify which items moved/changed.
+
+---
+
+### Q: What are the trade-offs between Redux and Zustand?
+
+**A:** Redux enforces strict unidirectional data flow and has excellent DevTools and time-travel debugging — great for complex state logic in large teams. But it requires significant boilerplate.
+
+Zustand is minimal — a store is just a function. It has no reducers, no actions, no provider needed. For most applications, Zustand is the right choice. Use Redux Toolkit (RTK) when you need: complex state machines, server-side rendering with state hydration, extensive middleware, or strong consistency guarantees in large teams.
+
+---
+
+## Advanced Production Concepts
+
+### Micro-Frontends
+
+At Netflix scale, the frontend itself becomes a distributed system. Different teams own different parts of the UI.
+
+```
+netflix.com home page
+├── Hero Section (owned by: Content Discovery Team)
+├── My List Row (owned by: Personalization Team)
+├── Continue Watching (owned by: Playback Team)
+├── Genre Rows (owned by: Catalog Team)
+└── Navigation (owned by: Platform Team)
+```
+
+Each section is a separately deployed frontend application. Module Federation (Webpack 5) allows sharing code between micro-frontends at runtime.
+
+### Edge-Side Rendering
+
+Next.js Edge Runtime and Cloudflare Workers allow running server-side rendering at CDN edge nodes — within milliseconds of the user, anywhere in the world. This combines the SEO/performance benefits of SSR with the low latency of a CDN.
+
+### Streaming SSR (React 18)
+
+```jsx
+// Stream HTML chunks to browser as they're ready
+// User sees content before ALL data has loaded
+import { Suspense } from 'react'
+
+export default function Dashboard() {
+  return (
+    <html>
+      <body>
+        <Header />  {/* Renders immediately */}
+        <Suspense fallback={<FeedSkeleton />}>
+          <Feed />  {/* Streams in when ready */}
+        </Suspense>
+        <Suspense fallback={<RecommendationsSkeleton />}>
+          <Recommendations />  {/* Streams in independently */}
+        </Suspense>
+      </body>
+    </html>
+  )
+}
+```
+
+---
+
+## Summary
+
+The frontend is the most user-visible layer in your stack. It determines how fast users perceive your app, how accessible it is, and how secure their sessions are. The key decisions are:
+
+1. **Rendering strategy** — SSR for SEO and performance, CSR for dashboards, SSG for content sites
+2. **State management** — Server state in React Query, UI state in Zustand, form state in React Hook Form
+3. **Performance** — Code split, lazy load images, virtualize long lists
+4. **Security** — Never trust frontend input, use CSP, httpOnly cookies for tokens
+
+The frontend alone cannot make an app production-grade. It depends on all 12 other layers working correctly below it.
+
+---
+
+## Production Checklist
+
+- [ ] TypeScript enabled with strict mode
+- [ ] All loading, error, and empty states handled
+- [ ] Bundle size analyzed and optimized (< 200KB initial JS)
+- [ ] Core Web Vitals pass (LCP < 2.5s, CLS < 0.1, INP < 200ms)
+- [ ] CSP headers configured
+- [ ] XSS prevention: no raw HTML injection
+- [ ] Auth tokens in httpOnly cookies, not localStorage
+- [ ] Accessibility: semantic HTML, ARIA labels, keyboard navigation
+- [ ] Responsive: tested on mobile, tablet, desktop
+- [ ] Error boundaries wrapping major sections
+- [ ] Environment variables: no secrets in client bundle
+- [ ] Images: optimized, WebP, lazy-loaded, correct dimensions
+- [ ] Code splitting: each route lazy-loaded
+- [ ] Lighthouse CI score > 90 on all metrics
+
+---
+
+## Recommended Resources
+
+| Resource | Type | Level |
+|----------|------|-------|
+| [Next.js Docs](https://nextjs.org/docs) | Official Docs | Beginner → Advanced |
+| [React Docs (new)](https://react.dev) | Official Docs | Beginner → Intermediate |
+| [web.dev Learn](https://web.dev/learn) | Course | Intermediate |
+| [JavaScript Info](https://javascript.info) | Book/Tutorial | Beginner → Advanced |
+| [Epic React (Kent C. Dodds)](https://epicreact.dev) | Paid Course | Intermediate → Advanced |
+| [TanStack Query Docs](https://tanstack.com/query) | Official Docs | Intermediate |
+| [The Primeagen - Frontend Masters](https://frontendmasters.com) | Video Course | Advanced |
+| [web.dev Vitals](https://web.dev/vitals/) | Reference | Intermediate |
+
+---
+
+*Next: [Layer 2: APIs & Backend Logic →](../02-backend/README.md)*

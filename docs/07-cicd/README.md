@@ -1,0 +1,670 @@
+# Layer 7: CI/CD & Version Control
+## Automated Pipelines That Ship Code Safely
+
+> **Layer role:** CI/CD (Continuous Integration / Continuous Deployment) is the automated pipeline that takes code from a developer's laptop to production. Version control is the source of truth for all code changes. Together they create a repeatable, auditable, and reliable software delivery system.
+
+---
+
+## Table of Contents
+
+1. [Beginner Explanation](#beginner-explanation)
+2. [Git Workflows](#git-workflows)
+3. [Continuous Integration](#continuous-integration)
+4. [Continuous Deployment](#continuous-deployment)
+5. [Pipeline Design](#pipeline-design)
+6. [Infrastructure as Code](#infrastructure-as-code)
+7. [GitHub Actions Deep Dive](#github-actions-deep-dive)
+8. [Branching Strategies](#branching-strategies)
+9. [Architecture Diagram](#architecture-diagram)
+10. [Common Mistakes](#common-mistakes)
+11. [Best Practices](#best-practices)
+12. [Interview-Level Insights](#interview-level-insights)
+13. [Summary](#summary)
+14. [Production Checklist](#production-checklist)
+
+---
+
+## Beginner Explanation
+
+Imagine a factory assembly line. Raw materials (code) go in one end, and finished products (running software) come out the other. The assembly line has quality checkpoints — inspectors who reject parts that don't meet standards. CI/CD is that assembly line for software.
+
+Without CI/CD: developers manually run tests, manually build containers, manually SSH to servers to deploy. At 3 developers, this works. At 30 developers pushing code dozens of times per day, it becomes chaos.
+
+With CI/CD: every code push automatically triggers a pipeline that runs tests, builds artifacts, and deploys to the right environment. No manual steps. The same process every time.
+
+---
+
+## Git Workflows
+
+### Trunk-Based Development (Recommended for CI/CD)
+
+```mermaid
+gitGraph
+    commit id: "Initial"
+    branch feature/user-auth
+    checkout feature/user-auth
+    commit id: "Add login endpoint"
+    commit id: "Add JWT signing"
+    checkout main
+    merge feature/user-auth id: "Merge PR #123"
+    branch feature/dark-mode
+    checkout feature/dark-mode
+    commit id: "CSS updates"
+    checkout main
+    merge feature/dark-mode id: "Merge PR #124"
+    commit id: "Hotfix: security patch"
+```
+
+**Rules:**
+- `main` branch is always deployable
+- Feature branches are short-lived (hours to 1-2 days maximum)
+- No long-running feature branches (they cause painful merges)
+- Small, frequent merges to main
+- Feature flags hide incomplete features from users
+
+### GitFlow (Traditional, for infrequent releases)
+
+```
+main ─────────────────────────────────────────────── (production)
+         ↑ merge release                ↑ hotfix
+release/1.2 ──────────────────────────
+develop ─────────────────────────────────────────── (integration)
+        ↑ merge          ↑ merge
+feature/auth      feature/payments
+```
+
+**When to use:** Libraries/packages with versioned releases, enterprise software with release cycles.
+
+**When NOT to use:** SaaS apps with continuous deployment. GitFlow is overkill and slows you down.
+
+---
+
+## Continuous Integration
+
+CI is the practice of automatically testing every code change the moment it's pushed.
+
+```mermaid
+flowchart LR
+    PUSH[Developer\npushes code] --> CI[CI Pipeline triggers]
+    CI --> LINT[Lint & Format\nESLint, Prettier]
+    LINT --> TYPECHECK[Type Check\ntsc --noEmit]
+    TYPECHECK --> TEST_UNIT[Unit Tests\nJest / Vitest]
+    TEST_UNIT --> TEST_INT[Integration Tests\nReal DB in Docker]
+    TEST_INT --> TEST_E2E[E2E Tests\nPlaywright / Cypress]
+    TEST_E2E --> SECURITY[Security Scan\nSnyk / Trivy]
+    SECURITY --> BUILD[Build Docker Image]
+    BUILD -->|All pass| SUCCESS[✅ PR can be merged]
+    LINT & TYPECHECK & TEST_UNIT -->|Any fail| FAIL[❌ PR blocked]
+```
+
+---
+
+## Continuous Deployment
+
+CD automatically deploys code that passes CI to an environment.
+
+```mermaid
+flowchart TD
+    MERGE[Merge to main] --> CI_PASS[CI passes ✅]
+    CI_PASS --> STAGING_DEPLOY[Auto-deploy to Staging]
+    STAGING_DEPLOY --> SMOKE[Smoke Tests\n5 critical user flows]
+    SMOKE -->|Pass| APPROVAL{Require manual\napproval for prod?}
+    APPROVAL -- Continuous Deployment --> PROD_DEPLOY[Auto-deploy to Production]
+    APPROVAL -- Continuous Delivery --> WAIT[Wait for human\napproval 👤]
+    WAIT -->|Approved| PROD_DEPLOY
+    PROD_DEPLOY --> CANARY[Canary: 5% traffic]
+    CANARY --> MONITOR[Monitor 15 min\nerror rate, latency]
+    MONITOR -->|OK| FULL[100% traffic]
+    MONITOR -->|Problems| ROLLBACK[Auto-rollback ⟲]
+```
+
+**Continuous Delivery vs Continuous Deployment:**
+- **Continuous Delivery**: Automatically deployable to production, but a human clicks "deploy"
+- **Continuous Deployment**: Automatically deploys to production after all tests pass
+- Most mature teams use CD for low-risk changes, manual approval for high-risk
+
+---
+
+## Pipeline Design
+
+### Complete Production Pipeline (GitHub Actions)
+
+```yaml
+# .github/workflows/pipeline.yml
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: 123456789.dkr.ecr.us-east-1.amazonaws.com
+  IMAGE_NAME: myapp/api
+  NODE_VERSION: '20'
+
+jobs:
+  # ─── Stage 1: Code Quality ──────────────────────────────
+  quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        run: npm run type-check
+
+      - name: Format check
+        run: npm run format:check
+
+  # ─── Stage 2: Testing ───────────────────────────────────
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    needs: quality
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://test:test@localhost:5432/test_db
+      REDIS_URL: redis://localhost:6379
+      JWT_SECRET: test-secret-at-least-32-characters-long
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Run migrations
+        run: npm run db:migrate
+
+      - name: Unit tests
+        run: npm run test:unit -- --coverage
+
+      - name: Integration tests
+        run: npm run test:integration
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+
+  # ─── Stage 3: Security ──────────────────────────────────
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: quality
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan dependencies (Snyk)
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high
+
+      - name: Scan for secrets
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+
+  # ─── Stage 4: Build ─────────────────────────────────────
+  build:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    needs: [test, security]
+    if: github.ref == 'refs/heads/main'   # Only on main branch
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::123456789:role/github-actions-deploy
+          aws-region: us-east-1
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan image (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          severity: CRITICAL,HIGH
+          exit-code: 1   # Fail if critical/high CVE found
+
+  # ─── Stage 5: Deploy to Staging ─────────────────────────
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build
+    environment: staging   # Requires environment protection rules
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::123456789:role/github-actions-deploy
+          aws-region: us-east-1
+
+      - name: Deploy to EKS (staging)
+        run: |
+          aws eks update-kubeconfig --name staging-cluster
+          kubectl set image deployment/api \
+            api=${{ needs.build.outputs.image-tag }} \
+            -n staging
+          kubectl rollout status deployment/api -n staging --timeout=5m
+
+      - name: Run smoke tests
+        run: npm run test:smoke -- --env staging
+        env:
+          SMOKE_BASE_URL: https://staging.example.com
+
+  # ─── Stage 6: Deploy to Production ──────────────────────
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    environment: production  # Requires manual approval in GitHub Environments
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::123456789:role/github-actions-prod
+          aws-region: us-east-1
+
+      - name: Canary deploy (5%)
+        run: |
+          aws eks update-kubeconfig --name prod-cluster
+          # Update canary deployment to new version
+          kubectl set image deployment/api-canary \
+            api=${{ needs.build.outputs.image-tag }} \
+            -n production
+          kubectl rollout status deployment/api-canary -n production
+
+      - name: Monitor canary for 10 minutes
+        run: |
+          sleep 600  # Wait 10 minutes
+          # Check error rate via CloudWatch
+          ERROR_RATE=$(aws cloudwatch get-metric-statistics ...)
+          if [ "$ERROR_RATE" -gt "1" ]; then
+            echo "Error rate too high, rolling back"
+            kubectl rollout undo deployment/api-canary -n production
+            exit 1
+          fi
+
+      - name: Full deployment
+        run: |
+          kubectl set image deployment/api \
+            api=${{ needs.build.outputs.image-tag }} \
+            -n production
+          kubectl rollout status deployment/api -n production
+
+      - name: Notify Slack
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "✅ Deployed ${{ github.sha }} to production by ${{ github.actor }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_DEPLOY_WEBHOOK }}
+```
+
+---
+
+## Infrastructure as Code
+
+Never click things in the AWS console. Define infrastructure in code so it's reproducible, auditable, and reviewable.
+
+```hcl
+# terraform/main.tf — Production EKS cluster
+
+terraform {
+  required_providers {
+    aws = { source = "hashicorp/aws", version = "~> 5.0" }
+  }
+  backend "s3" {
+    bucket         = "myapp-terraform-state"
+    key            = "production/terraform.tfstate"
+    region         = "us-east-1"
+    encrypt        = true
+    dynamodb_table = "terraform-state-lock"  # Prevent concurrent applies
+  }
+}
+
+module "vpc" {
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "~> 5.0"
+
+  name = "production"
+  cidr = "10.0.0.0/16"
+
+  azs             = ["us-east-1a", "us-east-1b", "us-east-1c"]
+  private_subnets = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+  public_subnets  = ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"]
+
+  enable_nat_gateway   = true
+  single_nat_gateway   = false  # One per AZ for HA
+  enable_dns_hostnames = true
+}
+
+module "eks" {
+  source  = "terraform-aws-modules/eks/aws"
+  version = "~> 20.0"
+
+  cluster_name    = "production"
+  cluster_version = "1.29"
+
+  vpc_id     = module.vpc.vpc_id
+  subnet_ids = module.vpc.private_subnets
+
+  cluster_endpoint_public_access = true
+
+  eks_managed_node_groups = {
+    main = {
+      instance_types = ["m7g.2xlarge"]
+      min_size       = 3
+      max_size       = 20
+      desired_size   = 5
+
+      labels = { workload = "general" }
+    }
+    spot = {
+      instance_types  = ["m7g.2xlarge", "m7g.4xlarge"]
+      capacity_type   = "SPOT"  # 70% cheaper than on-demand
+      min_size        = 0
+      max_size        = 10
+      desired_size    = 0
+      labels          = { workload = "batch" }  # Non-critical background jobs
+    }
+  }
+}
+
+module "rds" {
+  source  = "terraform-aws-modules/rds/aws"
+  version = "~> 6.0"
+
+  identifier = "production"
+  engine            = "postgres"
+  engine_version    = "16"
+  instance_class    = "db.r7g.2xlarge"
+  allocated_storage = 100
+  storage_encrypted = true
+
+  db_name  = "myapp"
+  username = "myapp"
+  port     = 5432
+
+  multi_az               = true
+  subnet_ids             = module.vpc.private_subnets
+  vpc_security_group_ids = [aws_security_group.rds.id]
+
+  deletion_protection = true  # Prevent accidental DELETE
+
+  backup_retention_period = 30  # 30 days of backups
+  backup_window           = "03:00-04:00"  # 3am UTC
+  maintenance_window      = "Mon:04:00-Mon:05:00"
+
+  enabled_cloudwatch_logs_exports = ["postgresql", "upgrade"]
+}
+```
+
+---
+
+## Branching Strategies
+
+| Strategy | Release Frequency | Team Size | Complexity | Use Case |
+|----------|------------------|-----------|-----------|---------|
+| **Trunk-based** | Multiple/day | Any | Low | Startups, SaaS, CI/CD-first |
+| **GitHub Flow** | Daily | Small-Medium | Low | Web apps, APIs |
+| **GitFlow** | Weekly/Sprint | Large | High | Packaged software, mobile apps |
+| **Release branches** | Sprint | Large | Medium | Stable + hotfix support |
+
+**GitHub Flow (simple and effective for most teams):**
+```
+1. Create feature branch from main
+2. Make commits
+3. Open pull request
+4. Code review
+5. CI passes
+6. Merge to main → auto-deploys
+```
+
+---
+
+## Architecture Diagram
+
+```mermaid
+graph TD
+    subgraph Dev["👩‍💻 Developer"]
+        LOCAL[Local Machine]
+        GIT[git push origin feature/xyz]
+    end
+
+    subgraph VCS["📦 Version Control - GitHub"]
+        PR[Pull Request]
+        MAIN[main branch]
+    end
+
+    subgraph CI["🤖 CI Pipeline - GitHub Actions"]
+        LINT_JOB[Lint + Types]
+        TEST_JOB[Tests + Coverage]
+        SEC_JOB[Security Scan]
+        BUILD_JOB[Docker Build + Push]
+    end
+
+    subgraph Registry["📦 Artifact Registry"]
+        ECR[AWS ECR\nVersioned Images]
+    end
+
+    subgraph Staging["🟡 Staging"]
+        STAGE_EKS[EKS Staging]
+        SMOKE[Smoke Tests]
+    end
+
+    subgraph Production["🟢 Production"]
+        APPROVAL[Manual Approval\nor Auto on green]
+        CANARY[Canary 5%]
+        FULL_PROD[Full Rollout 100%]
+    end
+
+    subgraph IaC["🏗️ Infrastructure"]
+        TF[Terraform\nPlan + Apply]
+        TFSTATE[State in S3]
+    end
+
+    LOCAL --> GIT --> PR
+    PR --> LINT_JOB & TEST_JOB & SEC_JOB
+    LINT_JOB & TEST_JOB & SEC_JOB -->|All pass| PR
+    PR -->|Reviewed + merged| MAIN
+    MAIN --> BUILD_JOB --> ECR
+    ECR --> STAGE_EKS --> SMOKE
+    SMOKE -->|Pass| APPROVAL --> CANARY --> FULL_PROD
+    TF --> TFSTATE
+
+    style Dev fill:#dbeafe
+    style CI fill:#fef9c3
+    style Staging fill:#dcfce7
+    style Production fill:#fee2e2
+    style IaC fill:#f3e8ff
+```
+
+---
+
+## Common Mistakes
+
+### 1. Pushing Secrets to Git
+```bash
+# ❌ Credentials in code — leaked forever, even after deletion
+DATABASE_URL = "postgresql://admin:supersecret@prod.db.com/myapp"
+STRIPE_KEY = "sk_live_abc123..."
+
+# ✅ Never in code — use environment variables from secrets manager
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+# Prevent accidents:
+# 1. Add .env to .gitignore
+# 2. Install git-secrets or gitleaks pre-commit hook
+# 3. Enable GitHub secret scanning (free)
+```
+
+### 2. Flaky Tests That Block Deploys
+```typescript
+// ❌ Test with timing dependency — fails 1/10 runs
+it('sends notification within deadline', async () => {
+  await sendNotification()
+  await sleep(100)  // Race condition: sometimes takes 150ms
+  expect(notifications).toHaveLength(1)  // Intermittent failure!
+})
+
+// ✅ Wait for condition properly
+it('sends notification', async () => {
+  await sendNotification()
+  await waitFor(() => expect(notifications).toHaveLength(1), {
+    timeout: 2000,
+    interval: 50,
+  })
+})
+```
+
+### 3. No Deployment Notifications
+```yaml
+# ❌ Deployments happen silently — nobody knows what's in production
+# ✅ Always notify team
+- name: Notify deployment
+  if: success()
+  run: |
+    curl -X POST $SLACK_WEBHOOK -d '{
+      "text": "✅ Deployed `'${{ github.sha }}'` to prod",
+      "attachments": [{
+        "fields": [
+          {"title": "By", "value": "'${{ github.actor }}'", "short": true},
+          {"title": "PR", "value": "'${{ github.event.pull_request.html_url }}'", "short": true}
+        ]
+      }]
+    }'
+```
+
+---
+
+## Best Practices
+
+1. **Protect the main branch** — Require PR reviews + CI to pass before merge.
+2. **Keep pipelines fast** — If CI takes > 10 minutes, developers bypass it. Parallelism, caching.
+3. **Separate staging from production AWS accounts** — Blast radius isolation.
+4. **Version your Docker images** — Never use `:latest` in production. Tag by git SHA.
+5. **Require code review** — At least one reviewer on every PR. Prevents knowledge silos and catches bugs.
+6. **Automate database migrations** — Run migrations as a step in the deployment pipeline.
+
+---
+
+## Interview-Level Insights
+
+### Q: What's the difference between CI and CD?
+
+**A:** CI (Continuous Integration) is about automatically building and testing code every time it's committed. The goal is to catch integration problems early — tests fail, you fix them before they affect others.
+
+CD (Continuous Delivery) means code is always in a deployable state and can be released to production at any time with one click or automatically. Continuous Deployment is the more aggressive version: every commit that passes CI automatically deploys to production.
+
+### Q: How do you handle database migrations in a CI/CD pipeline?
+
+**A:** Run migrations before deploying new application code. Specifically: deploy migrations to all DB replicas first, then rolling-deploy new app version. This way, old app code runs against the new schema during rollout.
+
+The critical rule: migrations must be backwards-compatible. Adding a column is safe (old code ignores it). Dropping a column or renaming one requires a 3-phase approach: 1) add new, 2) migrate data + run both, 3) drop old.
+
+---
+
+## Summary
+
+CI/CD is the engineering practice that enables teams to ship code confidently and frequently. Key principles:
+
+1. **Every commit triggers a pipeline** — No manual builds or deploys
+2. **Protect main** — Merging without tests passing is the same as deploying untested code
+3. **Fast feedback** — Slow pipelines are worse than no pipelines (developers ignore them)
+4. **IaC everything** — Cloud resources defined in Terraform, version controlled
+5. **Gradual rollouts** — Canary or blue-green for production safety
+
+---
+
+## Production Checklist
+
+- [ ] `main` branch protected (requires PR + CI pass)
+- [ ] Pre-commit hooks: lint, format, secrets check
+- [ ] CI runs on every PR (tests, lint, types, security)
+- [ ] Dependency vulnerability scanning (Snyk / Dependabot)
+- [ ] Container image scanning (Trivy)
+- [ ] Secrets scanning (TruffleHog / GitHub secret scanning)
+- [ ] Staging deployment auto-runs after main merge
+- [ ] Production requires staging to pass
+- [ ] Docker images tagged by git SHA (not `latest`)
+- [ ] Rollback procedure automated (kubectl rollout undo)
+- [ ] Deployment notifications to Slack/Teams
+- [ ] All infrastructure in Terraform
+- [ ] Terraform state in S3 with locking
+
+---
+
+*Previous: [Layer 6: Cloud →](../06-cloud/README.md) | Next: [Layer 8: Security →](../08-security/README.md)*

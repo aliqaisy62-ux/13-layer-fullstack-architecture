@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Full Stack Engineering Guide</title>
+<link rel="stylesheet" href="style.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head>
+<body>
+
+<!-- SIDEBAR -->
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-header">
+    <div class="logo">
+      <span class="logo-icon">⬡</span>
+      <span class="logo-text">FullStack.guide</span>
+    </div>
+    <p class="logo-sub">Engineering Knowledge System</p>
+  </div>
+
+  <div class="sidebar-search">
+    <div class="search-wrap">
+      <span class="search-icon">⌕</span>
+      <input type="text" id="search-input" placeholder="Search layers..." autocomplete="off" spellcheck="false">
+      <span class="search-hint">⌘K</span>
+    </div>
+    <div class="search-dropdown" id="search-dropdown"></div>
+  </div>
+
+  <div class="filter-row">
+    <button class="filter-tag active" data-filter="all">All</button>
+    <button class="filter-tag" data-filter="beginner">Beginner</button>
+    <button class="filter-tag" data-filter="intermediate">Intermediate</button>
+    <button class="filter-tag" data-filter="advanced">Advanced</button>
+  </div>
+
+  <nav class="sidebar-nav" id="nav"></nav>
+
+  <div class="sidebar-footer">
+    <div class="progress-bar-wrap">
+      <div class="progress-label">
+        <span id="progress-text">0 / 13 visited</span>
+        <span class="progress-pct" id="progress-pct">0%</span>
+      </div>
+      <div class="progress-track">
+        <div class="progress-fill" id="progress-fill" style="width:0%"></div>
+      </div>
+    </div>
+    <div class="footer-actions">
+      <button class="footer-btn" id="theme-btn" title="Toggle theme (T)">◑</button>
+      <button class="footer-btn" id="bookmark-btn" title="Bookmarks (B)">◇</button>
+      <button class="footer-btn" id="shortcuts-btn" title="Shortcuts (?)">⌨</button>
+      <button class="footer-btn" id="expand-btn" title="Expand all (E)">⊞</button>
+    </div>
+  </div>
+</aside>
+
+<!-- MOBILE TOP BAR -->
+<div class="mobile-bar">
+  <button class="menu-btn" id="menu-btn" aria-label="Menu">☰</button>
+  <span class="mobile-title" id="mobile-title">Full Stack Guide</span>
+  <span class="mobile-progress" id="mob-prog">1/13</span>
+</div>
+
+<!-- OVERLAY -->
+<div class="overlay" id="overlay"></div>
+
+<!-- BOOKMARKS PANEL -->
+<div class="panel" id="bookmarks-panel">
+  <div class="panel-header">
+    <span class="panel-title">Bookmarks</span>
+    <button class="panel-close" onclick="closePanel('bookmarks-panel')">✕</button>
+  </div>
+  <div class="panel-body" id="bookmarks-list">
+    <p class="panel-empty">No bookmarks yet. Press B to bookmark a layer.</p>
+  </div>
+</div>
+
+<!-- SHORTCUTS PANEL -->
+<div class="panel" id="shortcuts-panel">
+  <div class="panel-header">
+    <span class="panel-title">Keyboard Shortcuts</span>
+    <button class="panel-close" onclick="closePanel('shortcuts-panel')">✕</button>
+  </div>
+  <div class="panel-body">
+    <div class="shortcut-list">
+      <div class="shortcut-item"><kbd>←</kbd><kbd>→</kbd> <span>Navigate layers</span></div>
+      <div class="shortcut-item"><kbd>1</kbd>–<kbd>9</kbd> <span>Jump to layer</span></div>
+      <div class="shortcut-item"><kbd>E</kbd> <span>Expand all sections</span></div>
+      <div class="shortcut-item"><kbd>C</kbd> <span>Collapse all sections</span></div>
+      <div class="shortcut-item"><kbd>B</kbd> <span>Bookmark current</span></div>
+      <div class="shortcut-item"><kbd>T</kbd> <span>Toggle theme</span></div>
+      <div class="shortcut-item"><kbd>?</kbd> <span>Show shortcuts</span></div>
+      <div class="shortcut-item"><kbd>⌘K</kbd> <span>Focus search</span></div>
+      <div class="shortcut-item"><kbd>Esc</kbd> <span>Close panels</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- MAIN -->
+<main class="main" id="main">
+
+  <!-- BREADCRUMB / TOPBAR -->
+  <div class="content-topbar">
+    <div class="breadcrumbs" id="breadcrumbs">
+      <span class="bc-root">Full Stack Guide</span>
+      <span class="bc-sep">›</span>
+      <span class="bc-current" id="bc-current">Frontend</span>
+    </div>
+    <div class="topbar-actions">
+      <button class="topbar-btn" id="bm-current-btn" title="Bookmark this layer">◇ Bookmark</button>
+      <button class="topbar-btn" id="expand-all-btn" title="Expand all">⊞ Expand All</button>
+    </div>
+  </div>
+
+  <div class="content-wrap" id="content"></div>
+
+  <!-- PAGER -->
+  <div class="pager">
+    <button class="pager-btn" id="prev-btn" onclick="navigate(-1)">
+      <span class="pager-arrow">←</span>
+      <div class="pager-btn-inner">
+        <span class="pager-dir">Previous</span>
+        <span class="pager-label" id="prev-label">—</span>
+      </div>
+    </button>
+
+    <div class="pager-center">
+      <div class="pager-dots" id="dots"></div>
+      <span class="pager-num" id="pager-num">1 / 13</span>
+    </div>
+
+    <button class="pager-btn pager-btn-next" id="next-btn" onclick="navigate(1)">
+      <div class="pager-btn-inner">
+        <span class="pager-dir">Next</span>
+        <span class="pager-label" id="next-label">—</span>
+      </div>
+      <span class="pager-arrow">→</span>
+    </button>
+  </div>
+</main>
+
+<!-- TOAST CONTAINER -->
+<div class="toast-container" id="toast-container"></div>
+
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

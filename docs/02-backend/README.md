@@ -1,0 +1,1132 @@
+# Layer 2: APIs & Backend Logic
+## The Engine That Powers Every Application
+
+> **Layer role:** The backend is where your business logic lives. It receives requests from the frontend, validates them, applies business rules, communicates with databases and other services, and returns structured responses. It is the authoritative layer — the frontend can lie, but the backend must enforce the truth.
+
+---
+
+## Table of Contents
+
+1. [Beginner Explanation](#beginner-explanation)
+2. [Layer Overview](#layer-overview)
+3. [API Design: REST vs GraphQL vs gRPC](#api-design-rest-vs-graphql-vs-grpc)
+4. [Request Lifecycle](#request-lifecycle)
+5. [Layered Architecture](#layered-architecture)
+6. [Middleware](#middleware)
+7. [Validation & Error Handling](#validation--error-handling)
+8. [Background Jobs & Queues](#background-jobs--queues)
+9. [WebSockets & Real-time](#websockets--real-time)
+10. [Microservices vs Monolith](#microservices-vs-monolith)
+11. [Common Technologies](#common-technologies)
+12. [Real-World Example](#real-world-example-how-twitter-processes-a-tweet)
+13. [Architecture Diagram](#architecture-diagram)
+14. [Common Mistakes](#common-mistakes)
+15. [Best Practices](#best-practices)
+16. [Interview-Level Insights](#interview-level-insights)
+17. [Advanced Production Concepts](#advanced-production-concepts)
+18. [Summary](#summary)
+19. [Production Checklist](#production-checklist)
+20. [Recommended Resources](#recommended-resources)
+
+---
+
+## Beginner Explanation
+
+Think of the backend as the kitchen in a restaurant. Customers (users) interact with the dining room (frontend) and place orders. The waiter (API) carries those orders to the kitchen. The kitchen (backend) prepares the food using ingredients from the pantry (database). The kitchen enforces rules — "this dish requires 20 minutes", "we're out of salmon", "this customer has a peanut allergy" (business logic). It sends back finished dishes (JSON responses).
+
+The customer never enters the kitchen. They don't need to know how the food is made — they just get the result. That separation is the essence of the client-server architecture.
+
+**Key insight for beginners:** The backend is the **source of truth**. Frontend validation is for user experience. Backend validation is for data integrity and security. Always validate on the backend.
+
+---
+
+## Layer Overview
+
+| Attribute | Detail |
+|-----------|--------|
+| **Where it runs** | Your servers, cloud VMs, containers, serverless functions |
+| **Languages** | JavaScript/TypeScript, Python, Go, Java, Rust, PHP |
+| **Primary job** | Business logic, validation, orchestration, data access |
+| **Communicates with** | Layer 1 (Frontend) inbound, Layer 3 (DB), Layer 4 (Auth), other services |
+| **Performance metric** | Response time (p50/p95/p99), error rate, throughput (req/s) |
+| **Security threat** | Injection attacks, broken auth, insecure deserialization, SSRF |
+
+---
+
+## API Design: REST vs GraphQL vs gRPC
+
+### REST (Representational State Transfer)
+
+REST is the most widely used API style. It uses HTTP methods to perform operations on resources.
+
+```
+HTTP Methods → CRUD Operations:
+GET    /posts          → List all posts
+GET    /posts/123      → Get post 123
+POST   /posts          → Create a new post
+PUT    /posts/123      → Replace post 123
+PATCH  /posts/123      → Update part of post 123
+DELETE /posts/123      → Delete post 123
+```
+
+**REST API design principles:**
+
+```typescript
+// Good REST design
+// Resources are nouns, not verbs
+GET  /users/123/posts       ✅  (get posts for user 123)
+POST /users/123/posts       ✅  (create post for user 123)
+
+// Bad REST design
+GET  /getUserPosts?id=123   ❌  (verb in URL, uses GET for everything)
+POST /createPost            ❌  (verb in URL)
+
+// Status codes carry meaning
+200 OK            - Success, data in body
+201 Created       - Resource created (POST)
+204 No Content    - Success, no body (DELETE)
+400 Bad Request   - Client sent invalid data
+401 Unauthorized  - Not authenticated
+403 Forbidden     - Authenticated but not authorized
+404 Not Found     - Resource doesn't exist
+409 Conflict      - State conflict (duplicate, version mismatch)
+422 Unprocessable - Validation error
+429 Too Many Req  - Rate limited
+500 Server Error  - Backend bug
+```
+
+**Versioning strategy:**
+
+```
+URL versioning (most common):
+GET /api/v1/users
+GET /api/v2/users  (new version with breaking changes)
+
+Header versioning:
+GET /api/users
+Accept: application/vnd.myapp.v2+json
+
+Pros/cons:
+- URL versioning: Easy to cache, visible, easy to test
+- Header versioning: Clean URLs, harder to test in browser
+```
+
+---
+
+### GraphQL
+
+GraphQL is a query language for APIs. The client specifies exactly what data it needs — no more, no less.
+
+```graphql
+# Client defines the exact shape of data it wants
+query GetUserProfile($id: ID!) {
+  user(id: $id) {
+    id
+    name
+    email
+    # Only get the last 5 posts
+    posts(limit: 5, orderBy: CREATED_AT_DESC) {
+      id
+      title
+      excerpt
+      publishedAt
+      author {
+        name
+        avatar
+      }
+    }
+    # Only get follower count, not all followers
+    _followerCount
+  }
+}
+
+# Single endpoint handles everything
+mutation UpdateProfile($input: UpdateProfileInput!) {
+  updateProfile(input: $input) {
+    id
+    name
+    bio
+    updatedAt
+  }
+}
+
+# Real-time subscriptions
+subscription OnNewMessage($roomId: ID!) {
+  messageAdded(roomId: $roomId) {
+    id
+    content
+    sender {
+      name
+      avatar
+    }
+    createdAt
+  }
+}
+```
+
+**REST vs GraphQL trade-offs:**
+
+| Dimension | REST | GraphQL |
+|-----------|------|---------|
+| **Learning curve** | Low | Medium |
+| **Over-fetching** | Common | Eliminated |
+| **Under-fetching** | Common (N+1) | Eliminated |
+| **Caching** | Excellent (HTTP cache) | Complex (requires DataLoader) |
+| **Type safety** | Manual | Built-in schema |
+| **Tooling** | Mature | Excellent (Apollo, Relay) |
+| **Use case** | Simple APIs, public APIs | Complex data graphs, mobile |
+
+---
+
+### gRPC
+
+Used for service-to-service communication where performance is critical.
+
+```protobuf
+// Define your API in a .proto file
+syntax = "proto3";
+
+service UserService {
+  rpc GetUser(GetUserRequest) returns (User);
+  rpc CreateUser(CreateUserRequest) returns (User);
+  rpc StreamUserEvents(UserEventRequest) returns (stream UserEvent);
+}
+
+message GetUserRequest {
+  string user_id = 1;
+}
+
+message User {
+  string id = 1;
+  string name = 2;
+  string email = 3;
+  int64 created_at = 4;
+}
+```
+
+**gRPC advantages:** Binary protocol (smaller payloads), bidirectional streaming, generated client SDKs, strict typing. Used heavily in microservices (Google, Netflix internals).
+
+---
+
+## Request Lifecycle
+
+```mermaid
+flowchart TD
+    REQ[Incoming HTTP Request] --> MIDDLEWARE_CHAIN
+
+    subgraph MIDDLEWARE_CHAIN["Middleware Chain - Express/NestJS"]
+        MW1[1. Request Logger\nlog method, url, ip, timestamp]
+        MW2[2. Rate Limiter\ncheck Redis counter]
+        MW3[3. CORS Middleware\nvalidate origin header]
+        MW4[4. Auth Middleware\nvalidate JWT token]
+        MW5[5. Body Parser\nparse JSON body]
+        MW6[6. Input Validator\nvalidate against schema]
+        MW1 --> MW2 --> MW3 --> MW4 --> MW5 --> MW6
+    end
+
+    MW6 --> CONTROLLER
+
+    subgraph CONTROLLER["Controller Layer"]
+        C1[Extract params/body]
+        C2[Call service method]
+        C1 --> C2
+    end
+
+    C2 --> SERVICE
+
+    subgraph SERVICE["Service Layer - Business Logic"]
+        S1[Apply business rules]
+        S2[Orchestrate data access]
+        S3[Transform data]
+        S1 --> S2 --> S3
+    end
+
+    S2 --> REPOSITORY
+
+    subgraph REPOSITORY["Repository Layer - Data Access"]
+        R1{Cache Hit?}
+        R2[Redis Cache]
+        R3[Database Query]
+        R4[Update Cache]
+        R1 -- Yes --> R2
+        R1 -- No --> R3
+        R3 --> R4
+    end
+
+    R2 --> S3
+    R4 --> S3
+    S3 --> RESPONSE[JSON Response + Status Code]
+
+    style MIDDLEWARE_CHAIN fill:#dbeafe
+    style CONTROLLER fill:#dcfce7
+    style SERVICE fill:#fef9c3
+    style REPOSITORY fill:#fce7f3
+```
+
+---
+
+## Layered Architecture
+
+Well-structured backends separate concerns into distinct layers. This makes code testable, maintainable, and replaceable.
+
+```
+Request
+   │
+   ▼
+┌─────────────────────────────────────────────────────────────┐
+│  CONTROLLER (routes/02-backend/controllers/user.controller.ts)    │
+│  - Parse HTTP request (params, body, headers, query)        │
+│  - Call appropriate service method                          │
+│  - Return HTTP response                                     │
+│  - NO business logic here                                   │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  SERVICE (src/services/user.service.ts)                     │
+│  - Business rules and logic                                 │
+│  - Orchestrates multiple repositories                       │
+│  - Handles complex workflows                                │
+│  - Throws domain errors (UserNotFoundError, etc.)           │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  REPOSITORY (src/repositories/user.repository.ts)           │
+│  - All database queries live here                           │
+│  - Returns domain objects (not raw DB rows)                 │
+│  - Easy to swap DB without touching service/controller      │
+│  - Easy to mock in tests                                    │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  DATABASE (PostgreSQL / MongoDB / etc.)                     │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Implementation Example (NestJS / TypeScript)
+
+```typescript
+// ── Controller ─────────────────────────────────────────────
+@Controller('users')
+export class UserController {
+  constructor(private readonly userService: UserService) {}
+
+  @Get(':id')
+  @UseGuards(AuthGuard)
+  async getUser(@Param('id') id: string, @CurrentUser() caller: User): Promise<UserResponseDto> {
+    return this.userService.getUserById(id, caller)
+  }
+
+  @Post()
+  @HttpCode(201)
+  async createUser(@Body() createUserDto: CreateUserDto): Promise<UserResponseDto> {
+    return this.userService.createUser(createUserDto)
+  }
+}
+
+// ── Service ─────────────────────────────────────────────────
+@Injectable()
+export class UserService {
+  constructor(
+    private readonly userRepo: UserRepository,
+    private readonly emailService: EmailService,
+    private readonly cacheService: CacheService,
+  ) {}
+
+  async getUserById(id: string, caller: User): Promise<UserResponseDto> {
+    // Business rule: users can only see their own private data unless admin
+    if (id !== caller.id && !caller.isAdmin) {
+      throw new ForbiddenException('Cannot access another user profile')
+    }
+
+    const cached = await this.cacheService.get(`user:${id}`)
+    if (cached) return cached
+
+    const user = await this.userRepo.findById(id)
+    if (!user) throw new NotFoundException(`User ${id} not found`)
+
+    const response = UserResponseDto.from(user)
+    await this.cacheService.set(`user:${id}`, response, 300)
+    return response
+  }
+
+  async createUser(dto: CreateUserDto): Promise<UserResponseDto> {
+    // Business rule: email must be unique
+    const existing = await this.userRepo.findByEmail(dto.email)
+    if (existing) throw new ConflictException('Email already registered')
+
+    const hashedPassword = await bcrypt.hash(dto.password, 12)
+    const user = await this.userRepo.create({
+      ...dto,
+      password: hashedPassword,
+    })
+
+    // Side effect: send welcome email (non-blocking)
+    this.emailService.sendWelcome(user.email).catch(err => {
+      logger.error('Failed to send welcome email', { userId: user.id, err })
+    })
+
+    return UserResponseDto.from(user)
+  }
+}
+
+// ── Repository ──────────────────────────────────────────────
+@Injectable()
+export class UserRepository {
+  constructor(private readonly prisma: PrismaService) {}
+
+  async findById(id: string): Promise<User | null> {
+    return this.prisma.user.findUnique({
+      where: { id },
+      include: { profile: true },
+    })
+  }
+
+  async findByEmail(email: string): Promise<User | null> {
+    return this.prisma.user.findUnique({ where: { email } })
+  }
+
+  async create(data: CreateUserInput): Promise<User> {
+    return this.prisma.user.create({ data })
+  }
+}
+```
+
+---
+
+## Middleware
+
+Middleware functions run before your route handler. They form a pipeline that every request passes through.
+
+```mermaid
+graph LR
+    REQ[Request] --> L[Logger] --> RL[Rate Limiter] --> AUTH[Auth] --> VAL[Validator] --> HANDLER[Route Handler]
+    HANDLER --> ERR[Error Handler] --> RES[Response]
+
+    style L fill:#dbeafe
+    style RL fill:#dcfce7
+    style AUTH fill:#fef9c3
+    style VAL fill:#fce7f3
+    style ERR fill:#fee2e2
+```
+
+```typescript
+// Express middleware chain
+import express from 'express'
+import morgan from 'morgan'
+import helmet from 'helmet'
+import rateLimit from 'express-rate-limit'
+
+const app = express()
+
+// Security headers (HSTS, X-Frame-Options, etc.)
+app.use(helmet())
+
+// Request logging
+app.use(morgan('combined'))
+
+// Parse JSON bodies (with size limit to prevent large payload attacks)
+app.use(express.json({ limit: '1mb' }))
+
+// Rate limiting (see Layer 9 for deep dive)
+app.use('/api/', rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100,
+}))
+
+// Auth middleware — attach user to request
+app.use('/api/', async (req, res, next) => {
+  const token = req.headers.authorization?.split(' ')[1]
+  if (!token) return next()  // Public routes allowed
+  try {
+    req.user = await verifyJwt(token)
+    next()
+  } catch {
+    res.status(401).json({ error: 'Invalid token' })
+  }
+})
+
+// Global error handler — MUST be last
+app.use((err, req, res, next) => {
+  logger.error('Unhandled error', { err, path: req.path, user: req.user?.id })
+
+  if (err instanceof ValidationError) {
+    return res.status(422).json({ error: 'Validation failed', details: err.details })
+  }
+  if (err instanceof NotFoundError) {
+    return res.status(404).json({ error: err.message })
+  }
+  if (err instanceof ForbiddenError) {
+    return res.status(403).json({ error: 'Access denied' })
+  }
+
+  // Unknown error — don't leak internal details to client
+  res.status(500).json({ error: 'Internal server error' })
+})
+```
+
+---
+
+## Validation & Error Handling
+
+### Input Validation with Zod
+
+```typescript
+import { z } from 'zod'
+
+// Define schema as the single source of truth
+const CreatePostSchema = z.object({
+  title: z.string()
+    .min(1, 'Title is required')
+    .max(200, 'Title too long')
+    .trim(),
+  content: z.string()
+    .min(10, 'Content must be at least 10 characters')
+    .max(50000, 'Content too long'),
+  tags: z.array(z.string().max(30)).max(10).default([]),
+  publishedAt: z.string().datetime().optional(),
+  visibility: z.enum(['public', 'private', 'unlisted']).default('public'),
+})
+
+// TypeScript type is derived from schema — single source of truth
+type CreatePostInput = z.infer<typeof CreatePostSchema>
+
+// Middleware to validate request body
+function validateBody(schema: z.ZodSchema) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const result = schema.safeParse(req.body)
+    if (!result.success) {
+      return res.status(422).json({
+        error: 'Validation failed',
+        // Zod provides field-level errors
+        details: result.error.flatten().fieldErrors,
+      })
+    }
+    req.body = result.data  // Use parsed/coerced data
+    next()
+  }
+}
+
+// Usage
+router.post('/posts',
+  requireAuth,
+  validateBody(CreatePostSchema),
+  async (req, res) => {
+    const post = await postService.create(req.body as CreatePostInput, req.user)
+    res.status(201).json(post)
+  }
+)
+```
+
+### Domain Error Hierarchy
+
+```typescript
+// Custom error hierarchy — don't throw plain Error objects
+export class AppError extends Error {
+  constructor(
+    message: string,
+    public readonly statusCode: number,
+    public readonly code: string,
+    public readonly details?: unknown,
+  ) {
+    super(message)
+    this.name = this.constructor.name
+  }
+}
+
+export class NotFoundError extends AppError {
+  constructor(resource: string, id: string) {
+    super(`${resource} with id '${id}' not found`, 404, 'NOT_FOUND')
+  }
+}
+
+export class ForbiddenError extends AppError {
+  constructor(message = 'Access denied') {
+    super(message, 403, 'FORBIDDEN')
+  }
+}
+
+export class ConflictError extends AppError {
+  constructor(message: string) {
+    super(message, 409, 'CONFLICT')
+  }
+}
+
+export class ValidationError extends AppError {
+  constructor(details: Record<string, string[]>) {
+    super('Validation failed', 422, 'VALIDATION_ERROR', details)
+  }
+}
+```
+
+---
+
+## Background Jobs & Queues
+
+Not all work should happen synchronously in the request/response cycle. Heavy operations should be queued.
+
+```mermaid
+graph LR
+    subgraph Sync["⚡ Synchronous (HTTP)"]
+        REQ[Request] --> API[API Server]
+        API --> RES[Response 200ms]
+    end
+
+    subgraph Async["🔄 Asynchronous (Queue)"]
+        API2[API Server] --> Q[Message Queue\nRedis/RabbitMQ/SQS]
+        Q --> W1[Worker 1\nSend Emails]
+        Q --> W2[Worker 2\nProcess Images]
+        Q --> W3[Worker 3\nGenerate Reports]
+        W1 & W2 & W3 --> DB[(Database)]
+    end
+
+    style Sync fill:#dcfce7
+    style Async fill:#dbeafe
+```
+
+**What to queue:**
+- Sending emails / SMS
+- Image/video processing (transcoding)
+- PDF generation
+- Third-party API calls (slow, unreliable)
+- Webhook delivery (with retries)
+- Expensive report generation
+- Cache warming
+
+```typescript
+// BullMQ — production queue library for Node.js (backed by Redis)
+import { Queue, Worker } from 'bullmq'
+
+// Producer — add jobs to queue from your API handler
+const emailQueue = new Queue('emails', { connection: redisConnection })
+
+async function sendWelcomeEmail(userId: string) {
+  await emailQueue.add('welcome', { userId }, {
+    attempts: 3,              // Retry up to 3 times
+    backoff: { type: 'exponential', delay: 1000 },  // 1s, 2s, 4s delays
+    removeOnComplete: 100,    // Keep last 100 completed jobs for debugging
+    removeOnFail: 500,        // Keep last 500 failed jobs
+  })
+}
+
+// Consumer — separate worker process
+const emailWorker = new Worker('emails', async (job) => {
+  const { userId } = job.data
+  const user = await userRepo.findById(userId)
+
+  await sendgrid.send({
+    to: user.email,
+    subject: 'Welcome to our platform!',
+    html: renderWelcomeEmail(user),
+  })
+
+  logger.info('Welcome email sent', { userId, jobId: job.id })
+}, {
+  connection: redisConnection,
+  concurrency: 5,  // Process 5 emails simultaneously
+})
+
+emailWorker.on('failed', (job, err) => {
+  logger.error('Email job failed', { jobId: job.id, err: err.message })
+  sentry.captureException(err)
+})
+```
+
+---
+
+## WebSockets & Real-time
+
+For features like chat, live notifications, collaborative editing, or live feeds.
+
+```typescript
+// Socket.IO server — abstracts WebSocket with fallbacks
+import { Server } from 'socket.io'
+import { createAdapter } from '@socket.io/redis-adapter'
+
+const io = new Server(httpServer, {
+  cors: { origin: process.env.FRONTEND_URL },
+})
+
+// Scale across multiple servers using Redis pub/sub
+const pubClient = createClient({ url: process.env.REDIS_URL })
+const subClient = pubClient.duplicate()
+io.adapter(createAdapter(pubClient, subClient))
+
+// Auth middleware for WebSocket connections
+io.use(async (socket, next) => {
+  const token = socket.handshake.auth.token
+  try {
+    socket.data.user = await verifyJwt(token)
+    next()
+  } catch (err) {
+    next(new Error('Authentication failed'))
+  }
+})
+
+io.on('connection', (socket) => {
+  const { user } = socket.data
+  console.log(`User ${user.id} connected`)
+
+  // Join user to their personal room for targeted events
+  socket.join(`user:${user.id}`)
+
+  // Handle room join (chat rooms, game rooms, etc.)
+  socket.on('join_room', async (roomId: string) => {
+    const hasAccess = await checkRoomAccess(user.id, roomId)
+    if (!hasAccess) {
+      socket.emit('error', { message: 'Access denied to room' })
+      return
+    }
+    socket.join(`room:${roomId}`)
+    socket.to(`room:${roomId}`).emit('user_joined', { userId: user.id })
+  })
+
+  // Handle incoming message
+  socket.on('send_message', async (data: SendMessageInput) => {
+    const message = await messageService.create({
+      ...data,
+      senderId: user.id,
+    })
+    // Emit to all users in the room (including sender)
+    io.to(`room:${data.roomId}`).emit('new_message', message)
+  })
+
+  socket.on('disconnect', () => {
+    console.log(`User ${user.id} disconnected`)
+  })
+})
+
+// From anywhere in your backend, push events to specific users
+export function notifyUser(userId: string, event: string, data: unknown) {
+  io.to(`user:${userId}`).emit(event, data)
+}
+```
+
+---
+
+## Microservices vs Monolith
+
+This is one of the most consequential architecture decisions you'll make.
+
+```mermaid
+graph TB
+    subgraph Monolith["🏛️ Monolith"]
+        M[Single Deployable Unit]
+        M --> MA[Auth Module]
+        M --> MB[Posts Module]
+        M --> MC[Notifications Module]
+        M --> MD[Payment Module]
+        M --> DB1[(Single Database)]
+    end
+
+    subgraph Microservices["🔧 Microservices"]
+        GW[API Gateway]
+        GW --> AS[Auth Service]
+        GW --> PS[Posts Service]
+        GW --> NS[Notifications Service]
+        GW --> PAY[Payment Service]
+        AS --> DB2[(Auth DB)]
+        PS --> DB3[(Posts DB)]
+        NS --> DB4[(Events Store)]
+        PAY --> DB5[(Payment DB)]
+    end
+
+    style Monolith fill:#dcfce7
+    style Microservices fill:#dbeafe
+```
+
+### The Honest Guide to This Decision
+
+| Factor | Choose Monolith | Choose Microservices |
+|--------|----------------|---------------------|
+| **Team size** | < 20 engineers | > 50 engineers per domain |
+| **Stage** | MVP, early startup | Scaling established product |
+| **Deployment** | Single deploy is fine | Teams need independent deploys |
+| **Failure isolation** | Acceptable | Critical (payment failure ≠ auth failure) |
+| **Scale** | Same for all features | Different features need different scale |
+| **Complexity** | Lower | Significantly higher |
+
+> **Real-world insight:** Amazon, Netflix, and Uber all started as monoliths. They migrated to microservices only after their teams grew to hundreds of engineers and the monolith became a deployment bottleneck. Don't add microservice complexity before you have microservice problems.
+
+### Start with Modular Monolith
+
+```
+src/
+├── modules/
+│   ├── auth/
+│   │   ├── auth.controller.ts
+│   │   ├── auth.service.ts
+│   │   └── auth.module.ts
+│   ├── posts/
+│   │   ├── posts.controller.ts
+│   │   ├── posts.service.ts
+│   │   └── posts.module.ts
+│   └── notifications/
+│       ├── notifications.service.ts
+│       └── notifications.module.ts
+├── shared/
+│   ├── database/
+│   ├── redis/
+│   └── logger/
+└── main.ts
+```
+
+This structure lets you deploy as one unit but extract services later if needed — without a big bang rewrite.
+
+---
+
+## Common Technologies
+
+| Framework | Language | Best For | Company |
+|-----------|----------|----------|---------|
+| **NestJS** | TypeScript | Structured enterprise Node.js | Community |
+| **Express** | JavaScript/TS | Minimal, flexible Node.js | Community |
+| **Fastify** | JavaScript/TS | High-performance Node.js | Community |
+| **FastAPI** | Python | High-performance Python APIs | Community |
+| **Django** | Python | Full-featured Python, rapid dev | Community |
+| **Spring Boot** | Java | Enterprise Java, large teams | VMware/Broadcom |
+| **Go (Gin/Fiber)** | Go | Ultra-high performance | Community |
+| **Rails** | Ruby | Rapid development | Community |
+| **Laravel** | PHP | PHP ecosystem | Community |
+| **Hono** | TypeScript | Edge runtime APIs | Community |
+
+### Performance Benchmark Reference
+
+```
+Framework         Requests/sec  (simple JSON endpoint, 10 cores)
+──────────────────────────────────────────────────────────────
+Go (Fiber)        ~500,000/s
+Rust (Actix)      ~450,000/s
+Go (Gin)          ~350,000/s
+Java (Spring Boot)~150,000/s
+Node (Fastify)    ~120,000/s
+Python (FastAPI)  ~70,000/s
+Node (Express)    ~60,000/s
+Python (Django)   ~20,000/s
+```
+
+*Note: Raw throughput rarely matters below 10M req/day. Choose based on team expertise and ecosystem.*
+
+---
+
+## Real-World Example: How Twitter Processes a Tweet
+
+```mermaid
+sequenceDiagram
+    participant FE as 📱 Mobile App
+    participant API as ⚙️ Tweet API
+    participant AUTH as 🔐 Auth Service
+    participant QUEUE as 📬 Message Queue
+    participant FANOUT as 📡 Fan-out Worker
+    participant SEARCH as 🔍 Search Indexer
+    participant NOTIF as 🔔 Notification Worker
+    participant DB as 🗄️ Tweet DB
+    participant CACHE as ⚡ Timeline Cache
+
+    FE->>API: POST /tweets {content, media_ids}
+    API->>AUTH: Validate JWT token
+    AUTH-->>API: user_id=@elonmusk, valid
+    API->>API: Validate content (280 chars, no banned words)
+    API->>DB: INSERT INTO tweets (user_id, content, ...)
+    DB-->>API: tweet_id=123456789
+    API-->>FE: 201 Created {tweet_id: 123456789}
+    Note over FE,API: Response in <200ms — job done for user
+
+    par Async Fan-out (background)
+        API->>QUEUE: Publish tweet_created event
+        QUEUE->>FANOUT: Process fan-out
+        Note over FANOUT: 100M followers = 100M timeline updates
+        FANOUT->>CACHE: Update timelines for top followers
+        FANOUT->>SEARCH: Index tweet for full-text search
+        FANOUT->>NOTIF: Send notifications to mentioned users
+    end
+```
+
+**Key insight:** The response to the user (tweet created) happens in <200ms. The fan-out to 100 million followers happens asynchronously in the background and can take seconds — but the user doesn't wait for it.
+
+---
+
+## Architecture Diagram
+
+```mermaid
+graph TB
+    subgraph Clients
+        WEB[Web Browser]
+        MOBILE[Mobile App]
+        THIRD[Third-party Clients]
+    end
+
+    subgraph API_Layer["API Layer"]
+        GW[API Gateway\nAuth · Rate Limit · Routing]
+        REST[REST Controllers]
+        GQL[GraphQL Resolver]
+        WS[WebSocket Handler]
+    end
+
+    subgraph Service_Layer["Service Layer"]
+        US[User Service]
+        PS[Post Service]
+        NS[Notification Service]
+        ES[Email Service]
+    end
+
+    subgraph Job_Layer["Background Jobs"]
+        Q[Job Queue - Redis/SQS]
+        W[Worker Pool]
+        SCHED[Cron Scheduler]
+    end
+
+    subgraph Data_Layer["Data Layer"]
+        PG[(PostgreSQL)]
+        REDIS[(Redis Cache)]
+        S3[(S3 Object Store)]
+        SEARCH[(Elasticsearch)]
+    end
+
+    WEB & MOBILE & THIRD --> GW
+    GW --> REST & GQL & WS
+    REST & GQL --> US & PS & NS
+    NS --> Q
+    Q --> W
+    SCHED --> Q
+    US & PS --> PG
+    US & PS --> REDIS
+    PS --> S3
+    PS --> SEARCH
+    W --> ES
+
+    style API_Layer fill:#dbeafe
+    style Service_Layer fill:#dcfce7
+    style Job_Layer fill:#fef9c3
+    style Data_Layer fill:#fce7f3
+```
+
+---
+
+## Common Mistakes
+
+### 1. Business Logic in Controllers
+```typescript
+// ❌ Fat controller — business logic directly in route handler
+router.post('/transfer', async (req, res) => {
+  const { fromAccountId, toAccountId, amount } = req.body
+  // Business logic should NOT be here
+  const from = await db.account.findById(fromAccountId)
+  if (from.balance < amount) {
+    return res.status(400).json({ error: 'Insufficient funds' })
+  }
+  // Direct DB calls, no transaction, no audit log...
+  await db.account.update(fromAccountId, { balance: from.balance - amount })
+  await db.account.update(toAccountId, { balance: to.balance + amount })
+  res.json({ success: true })
+})
+
+// ✅ Thin controller, rich service
+router.post('/transfer', requireAuth, validateBody(TransferSchema), async (req, res) => {
+  const result = await transferService.transfer(req.body, req.user)
+  res.json(result)
+})
+```
+
+### 2. Not Using Transactions
+```typescript
+// ❌ Two separate DB calls — if the second fails, data is corrupted
+await db.account.deductBalance(fromId, amount)
+await db.account.addBalance(toId, amount)   // What if this fails?
+
+// ✅ Atomic transaction — either both succeed or neither does
+await db.transaction(async (tx) => {
+  await tx.account.deductBalance(fromId, amount)
+  await tx.account.addBalance(toId, amount)
+  await tx.auditLog.create({ type: 'TRANSFER', fromId, toId, amount })
+})
+```
+
+### 3. Synchronous Heavy Operations
+```typescript
+// ❌ Making user wait while sending email (300ms+ delay)
+router.post('/register', async (req, res) => {
+  const user = await createUser(req.body)
+  await emailService.send(user.email, 'Welcome!')  // BLOCKING
+  res.json(user)
+})
+
+// ✅ Queue the email, respond immediately
+router.post('/register', async (req, res) => {
+  const user = await createUser(req.body)
+  emailQueue.add({ userId: user.id })  // Fire and forget
+  res.status(201).json(user)
+})
+```
+
+### 4. Missing Idempotency
+```typescript
+// Problem: User double-clicks "Pay" — two charges to their card
+// ❌ No idempotency protection
+router.post('/payments', async (req, res) => {
+  const charge = await stripe.charges.create({ amount: req.body.amount })
+  res.json(charge)
+})
+
+// ✅ Idempotency key prevents duplicate charges
+router.post('/payments', async (req, res) => {
+  const { idempotencyKey } = req.headers
+  const existing = await paymentRepo.findByIdempotencyKey(idempotencyKey)
+  if (existing) return res.json(existing)  // Return previous result
+
+  const charge = await stripe.charges.create({
+    amount: req.body.amount,
+    idempotency_key: idempotencyKey,
+  })
+  await paymentRepo.save({ ...charge, idempotencyKey })
+  res.json(charge)
+})
+```
+
+---
+
+## Best Practices
+
+1. **Use DTOs (Data Transfer Objects)** — Never expose raw database models to API consumers. Strip sensitive fields, format dates consistently.
+2. **Structured logging** — Log request IDs so you can trace a request across all services.
+3. **Health check endpoint** — `GET /health` returns 200 if the service is up and connected to all dependencies.
+4. **Graceful shutdown** — Handle SIGTERM: stop accepting new requests, drain the queue, close DB connections.
+5. **Never log sensitive data** — No passwords, tokens, credit card numbers, SSNs in logs.
+6. **Correlation IDs** — Attach a unique ID to every request and pass it through all service calls for distributed tracing.
+
+---
+
+## Interview-Level Insights
+
+### Q: What's the N+1 problem and how do you solve it?
+
+**A:** The N+1 problem is a database performance anti-pattern. You make 1 query to get N records, then N additional queries to get related data for each record.
+
+```typescript
+// N+1 Problem
+const posts = await db.post.findMany({ limit: 20 })  // 1 query
+for (const post of posts) {
+  post.author = await db.user.findById(post.authorId)  // 20 queries!
+}
+// Total: 21 database queries
+
+// Solution 1: JOIN / Include
+const posts = await db.post.findMany({
+  limit: 20,
+  include: { author: true }  // 1 query with JOIN
+})
+
+// Solution 2: DataLoader (batching — essential for GraphQL)
+const authorLoader = new DataLoader(async (ids) => {
+  const authors = await db.user.findMany({ where: { id: { in: ids } } })
+  return ids.map(id => authors.find(a => a.id === id))
+})
+// Batches all author lookups into a single query
+```
+
+### Q: How would you design a rate limiter?
+
+See [Layer 9: Rate Limiting](../09-rate-limiting/README.md) for the full answer.
+
+### Q: How do you handle long-running operations in a REST API?
+
+**A:** Use the async job pattern:
+1. Client POSTs request → API validates, queues job, returns `202 Accepted` with job ID
+2. Worker processes job asynchronously
+3. Client polls `GET /jobs/{id}` for status OR uses WebSocket to receive completion event
+4. On completion, client fetches the result
+
+---
+
+## Advanced Production Concepts
+
+### Circuit Breaker Pattern
+
+When a downstream service is failing, don't keep hammering it — trip a circuit breaker.
+
+```typescript
+import CircuitBreaker from 'opossum'
+
+const paymentOptions = {
+  timeout: 3000,         // Call must succeed within 3s
+  errorThresholdPercentage: 50,  // Trip if 50% of calls fail
+  resetTimeout: 30000,   // Try again after 30s
+}
+
+const breaker = new CircuitBreaker(callPaymentService, paymentOptions)
+
+breaker.fallback(() => ({
+  status: 'payment_service_unavailable',
+  message: 'Payment temporarily unavailable. Try again in 30 seconds.'
+}))
+
+breaker.on('open', () => logger.warn('Payment circuit breaker OPEN'))
+breaker.on('halfOpen', () => logger.info('Payment circuit breaker testing...'))
+breaker.on('close', () => logger.info('Payment circuit breaker CLOSED (healthy)'))
+```
+
+### Bulkhead Pattern
+
+Isolate failures so one slow service can't exhaust all your connection pools.
+
+```typescript
+// Separate connection pools for different operations
+const criticalPool = new Pool({ max: 20 })     // For user auth, payments
+const readPool = new Pool({ max: 10 })          // For analytics, reports
+const backgroundPool = new Pool({ max: 5 })    // For background jobs
+
+// Critical operations get their own dedicated resources
+// Even if analytics queries are slow/stuck, auth still works
+```
+
+---
+
+## Summary
+
+The backend is where trust is enforced. It:
+- Validates every input (never trust the client)
+- Applies business rules that define what your product does
+- Orchestrates data access through a clean repository layer
+- Responds synchronously for fast operations, queues for heavy ones
+- Uses middleware for cross-cutting concerns
+
+The architecture pattern matters: thin controllers, rich services, isolated repositories make your backend testable, maintainable, and replaceable.
+
+---
+
+## Production Checklist
+
+- [ ] All inputs validated with schema library (Zod, Joi, class-validator)
+- [ ] Custom error hierarchy with appropriate HTTP status codes
+- [ ] No business logic in controllers
+- [ ] Database operations wrapped in transactions where needed
+- [ ] Heavy operations queued (email, image processing, webhooks)
+- [ ] Graceful shutdown handler (SIGTERM)
+- [ ] Health check endpoint (`/health`)
+- [ ] Correlation ID on every request
+- [ ] Structured logging (JSON format)
+- [ ] No sensitive data in logs
+- [ ] DTOs separate domain models from API responses
+- [ ] Idempotency for payment/critical operations
+- [ ] Circuit breakers for external service calls
+- [ ] API versioning strategy defined
+
+---
+
+## Recommended Resources
+
+| Resource | Type | Level |
+|----------|------|-------|
+| [NestJS Docs](https://docs.nestjs.com) | Official Docs | Intermediate |
+| [FastAPI Docs](https://fastapi.tiangolo.com) | Official Docs | Beginner → Intermediate |
+| [Designing Data-Intensive Applications](https://dataintensive.net) | Book | Advanced |
+| [System Design Primer (GitHub)](https://github.com/donnemartin/system-design-primer) | Reference | Intermediate → Advanced |
+| [BullMQ Docs](https://docs.bullmq.io) | Official Docs | Intermediate |
+| [Zod Docs](https://zod.dev) | Official Docs | Beginner |
+| [Building Microservices — Sam Newman](https://samnewman.io/books/building_microservices/) | Book | Advanced |
+
+---
+
+*Previous: [Layer 1: Frontend ←](../01-frontend/README.md) | Next: [Layer 3: Database & Storage →](../03-database/README.md)*

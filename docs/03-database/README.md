@@ -1,0 +1,938 @@
+# Layer 3: Database & Storage
+## The Foundation of All Persistent Data
+
+> **Layer role:** The database layer is responsible for storing, organizing, retrieving, and protecting your data. It is the most critical layer for data integrity and correctness. Every other layer depends on this one. Getting the database wrong — schema design, indexing, transactions — causes problems that are expensive and slow to fix in production.
+
+---
+
+## Table of Contents
+
+1. [Beginner Explanation](#beginner-explanation)
+2. [SQL vs NoSQL — The Real Decision](#sql-vs-nosql--the-real-decision)
+3. [ACID Transactions](#acid-transactions)
+4. [Schema Design & Normalization](#schema-design--normalization)
+5. [Indexing & Query Optimization](#indexing--query-optimization)
+6. [Replication & High Availability](#replication--high-availability)
+7. [Sharding & Horizontal Scaling](#sharding--horizontal-scaling)
+8. [Object Storage](#object-storage)
+9. [Backups & Point-in-Time Recovery](#backups--point-in-time-recovery)
+10. [Common Technologies](#common-technologies)
+11. [Real-World Example](#real-world-example-how-stripe-stores-payment-data)
+12. [Architecture Diagram](#architecture-diagram)
+13. [Common Mistakes](#common-mistakes)
+14. [Best Practices](#best-practices)
+15. [Interview-Level Insights](#interview-level-insights)
+16. [Advanced Production Concepts](#advanced-production-concepts)
+17. [Summary](#summary)
+18. [Production Checklist](#production-checklist)
+
+---
+
+## Beginner Explanation
+
+Imagine a library. Books are like data. The database is the library's system for organizing those books — the shelves (tables), the card catalog (indexes), the checkout desk (transactions). Without a good organizing system, finding any book takes forever. Without checkout records, two people try to check out the same book simultaneously. Without backups, a fire destroys everything.
+
+Databases solve these exact problems: organized storage, fast lookup, concurrent access with integrity, and durability. The difference between an in-memory data structure (like a JavaScript object) and a database is that databases **survive crashes**, handle **thousands of simultaneous users**, and guarantee **data won't be corrupted**.
+
+---
+
+## SQL vs NoSQL — The Real Decision
+
+This is the most commonly misunderstood database decision. Here's the honest guide.
+
+### Relational Databases (SQL)
+
+Data lives in tables with rows and columns. Tables relate to each other via foreign keys. You query with SQL (Structured Query Language).
+
+```sql
+-- Tables relate to each other
+CREATE TABLE users (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email       VARCHAR(255) UNIQUE NOT NULL,
+  created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE posts (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  title       VARCHAR(500) NOT NULL,
+  content     TEXT NOT NULL,
+  published   BOOLEAN DEFAULT FALSE,
+  created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE post_tags (
+  post_id     UUID REFERENCES posts(id) ON DELETE CASCADE,
+  tag_id      UUID REFERENCES tags(id) ON DELETE CASCADE,
+  PRIMARY KEY (post_id, tag_id)
+);
+
+-- JOINs combine related data
+SELECT
+  p.id,
+  p.title,
+  u.email AS author_email,
+  COUNT(DISTINCT c.id) AS comment_count,
+  ARRAY_AGG(t.name) AS tags
+FROM posts p
+JOIN users u ON u.id = p.user_id
+LEFT JOIN comments c ON c.post_id = p.id
+LEFT JOIN post_tags pt ON pt.post_id = p.id
+LEFT JOIN tags t ON t.id = pt.tag_id
+WHERE p.published = TRUE
+GROUP BY p.id, u.email
+ORDER BY p.created_at DESC
+LIMIT 20;
+```
+
+### Document Databases (NoSQL — MongoDB)
+
+Data lives in flexible JSON-like documents. No fixed schema. No JOINs — embed related data.
+
+```javascript
+// Document — all related data in one place
+{
+  "_id": "post_123",
+  "title": "How databases work",
+  "content": "...",
+  "publishedAt": ISODate("2024-01-15"),
+  "author": {
+    "id": "user_456",
+    "name": "Alice Smith",
+    "avatar": "https://cdn.example.com/alice.jpg"
+  },
+  // Tags embedded — no separate table
+  "tags": ["databases", "engineering", "tutorial"],
+  // Recent comments embedded for fast read
+  "comments": [
+    { "id": "c1", "text": "Great post!", "author": "Bob" },
+    { "id": "c2", "text": "Very helpful", "author": "Carol" }
+  ],
+  "commentCount": 47,
+  "likeCount": 312
+}
+```
+
+### The Decision Matrix
+
+| Use Case | Best Choice | Why |
+|----------|------------|-----|
+| Financial data (payments, accounts) | **PostgreSQL** | ACID, transactions are critical |
+| User authentication | **PostgreSQL** | Relational, security-critical |
+| E-commerce orders | **PostgreSQL** | Complex relationships, transactions |
+| Blog/CMS content | **PostgreSQL or MongoDB** | Either works well |
+| Product catalog | **MongoDB** | Flexible schema, nested attributes |
+| Session storage | **Redis** | Key-value, TTL, in-memory speed |
+| Time-series metrics | **InfluxDB / TimescaleDB** | Optimized for time-series data |
+| Full-text search | **Elasticsearch** | Built for search, scoring, facets |
+| Social graph | **Neo4j / AWS Neptune** | Graph queries are natural |
+| Event sourcing | **EventStoreDB / Kafka** | Append-only, replay |
+| IoT sensor data | **Cassandra / InfluxDB** | High write throughput |
+
+> **Honest advice:** If you're not sure, use PostgreSQL. It handles 95% of use cases. It supports JSON columns (like MongoDB), full-text search (like Elasticsearch), and time-series extensions. You can always add specialized databases later when you have specific bottlenecks.
+
+---
+
+## ACID Transactions
+
+ACID is the foundation of database reliability. Understanding it is non-negotiable for backend engineering.
+
+```
+A - Atomicity     All operations in a transaction succeed, or none do.
+C - Consistency   The database moves from one valid state to another valid state.
+I - Isolation     Concurrent transactions don't see each other's intermediate states.
+D - Durability    Once committed, data survives crashes (written to disk/WAL).
+```
+
+### Why ACID Matters: The Bank Transfer
+
+```sql
+-- Without transactions: catastrophic failure scenarios
+UPDATE accounts SET balance = balance - 100 WHERE id = 'alice';
+-- SERVER CRASHES HERE --
+UPDATE accounts SET balance = balance + 100 WHERE id = 'bob';
+-- $100 was deducted from Alice but never added to Bob. Money vanished.
+
+-- With transactions: atomicity guarantees all-or-nothing
+BEGIN;
+  UPDATE accounts SET balance = balance - 100 WHERE id = 'alice'
+    WHERE balance >= 100;  -- Prevent overdraft
+  IF NOT FOUND THEN
+    ROLLBACK;  -- Alice doesn't have enough, undo everything
+    RAISE EXCEPTION 'Insufficient funds';
+  END IF;
+  UPDATE accounts SET balance = balance + 100 WHERE id = 'bob';
+  INSERT INTO audit_log (action, from_id, to_id, amount)
+    VALUES ('transfer', 'alice', 'bob', 100);
+COMMIT;
+-- All three operations committed atomically, or none were
+```
+
+### Isolation Levels
+
+Isolation levels are a crucial PostgreSQL tuning decision. Higher isolation = more correctness, more locking.
+
+```
+READ UNCOMMITTED  — Can read uncommitted data (dirty reads). Fastest, least safe.
+READ COMMITTED    — Can only read committed data. PostgreSQL's default.
+REPEATABLE READ   — Same query returns same results within a transaction.
+SERIALIZABLE      — Transactions execute as if sequential. Safest, slowest.
+```
+
+```sql
+-- Phantom read problem — fixed by REPEATABLE READ
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+  SELECT COUNT(*) FROM seats WHERE available = TRUE;  -- Returns 5
+  -- Another transaction books a seat HERE
+  SELECT COUNT(*) FROM seats WHERE available = TRUE;  -- Still returns 5 (repeatable)
+COMMIT;
+
+-- Lost update problem — fixed by SELECT FOR UPDATE
+BEGIN;
+  SELECT * FROM seats WHERE id = 123 FOR UPDATE;  -- Lock the row
+  -- No other transaction can modify this row until we COMMIT
+  UPDATE seats SET available = FALSE, user_id = 456 WHERE id = 123;
+COMMIT;
+```
+
+---
+
+## Schema Design & Normalization
+
+### Entity-Relationship Diagram (E-R)
+
+```mermaid
+erDiagram
+    USERS {
+        uuid id PK
+        varchar email UK
+        varchar password_hash
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    PROFILES {
+        uuid id PK
+        uuid user_id FK
+        varchar display_name
+        text bio
+        varchar avatar_url
+    }
+
+    POSTS {
+        uuid id PK
+        uuid author_id FK
+        varchar title
+        text content
+        boolean published
+        timestamptz published_at
+        timestamptz created_at
+    }
+
+    COMMENTS {
+        uuid id PK
+        uuid post_id FK
+        uuid author_id FK
+        text content
+        timestamptz created_at
+    }
+
+    TAGS {
+        uuid id PK
+        varchar name UK
+        varchar slug UK
+    }
+
+    POST_TAGS {
+        uuid post_id FK
+        uuid tag_id FK
+    }
+
+    FOLLOWS {
+        uuid follower_id FK
+        uuid followee_id FK
+        timestamptz created_at
+    }
+
+    USERS ||--|| PROFILES : "has one"
+    USERS ||--o{ POSTS : "authors"
+    USERS ||--o{ COMMENTS : "writes"
+    POSTS ||--o{ COMMENTS : "receives"
+    POSTS }o--o{ TAGS : "tagged with"
+    USERS }o--o{ USERS : "follows"
+```
+
+### Normalization vs Denormalization
+
+**Normalization** (eliminate duplication):
+```sql
+-- Author's name stored once in users table
+-- posts table only has user_id (foreign key)
+-- Consistent, no update anomalies
+CREATE TABLE posts (
+  id      UUID PRIMARY KEY,
+  user_id UUID REFERENCES users(id),  -- Reference, not copy
+  title   VARCHAR(500)
+);
+```
+
+**Denormalization** (for read performance):
+```sql
+-- Post table stores author name directly (duplicate data)
+-- No JOIN needed to display post with author name
+-- Tradeoff: if user changes name, must update all their posts
+CREATE TABLE posts_denormalized (
+  id           UUID PRIMARY KEY,
+  user_id      UUID,
+  author_name  VARCHAR(200),  -- Duplicated from users table
+  author_avatar VARCHAR(500), -- Duplicated from users table
+  title        VARCHAR(500)
+);
+```
+
+**When to denormalize:**
+- Read-heavy workload (50:1 read/write ratio)
+- JOIN is provably slow (EXPLAIN ANALYZE shows sequential scan)
+- The duplicated data changes rarely (like username)
+- After optimization attempts (indexes, covering indexes) still can't meet SLA
+
+---
+
+## Indexing & Query Optimization
+
+Indexes are the most impactful performance optimization available. Without them, every query scans every row.
+
+```sql
+-- Without index: Full table scan = O(N) — reads every row
+EXPLAIN ANALYZE SELECT * FROM posts WHERE user_id = '123';
+-- Seq Scan on posts (cost=0.00..15420.00 rows=1000)
+-- Actual time: 245ms (on 1M rows)
+
+-- With index: B-tree lookup = O(log N)
+CREATE INDEX idx_posts_user_id ON posts(user_id);
+EXPLAIN ANALYZE SELECT * FROM posts WHERE user_id = '123';
+-- Index Scan using idx_posts_user_id (cost=0.43..850.00 rows=1000)
+-- Actual time: 1.2ms (1000x faster!)
+```
+
+### Index Types
+
+```sql
+-- B-tree (default) — equality and range queries
+CREATE INDEX idx_posts_created_at ON posts(created_at DESC);
+
+-- Composite index — queries filtering multiple columns
+-- Index column order matters: most selective column first
+CREATE INDEX idx_posts_user_published ON posts(user_id, published, created_at DESC);
+-- This index serves: WHERE user_id = ? AND published = TRUE ORDER BY created_at
+
+-- Partial index — only index a subset of rows (smaller, faster)
+CREATE INDEX idx_posts_published ON posts(created_at DESC)
+  WHERE published = TRUE;  -- Only index published posts
+
+-- Covering index — include extra columns to avoid heap fetches
+CREATE INDEX idx_posts_cover ON posts(user_id, published)
+  INCLUDE (title, created_at);
+-- Query can be answered entirely from the index without reading the table
+
+-- GIN index — for JSONB, arrays, and full-text search
+CREATE INDEX idx_posts_tags ON posts USING GIN(tags);
+CREATE INDEX idx_posts_content_fts ON posts USING GIN(to_tsvector('english', content));
+
+-- Full-text search query
+SELECT * FROM posts
+WHERE to_tsvector('english', title || ' ' || content) @@ to_tsquery('database & performance');
+```
+
+### Reading EXPLAIN ANALYZE
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+SELECT p.*, u.email
+FROM posts p
+JOIN users u ON u.id = p.user_id
+WHERE p.published = TRUE
+  AND p.created_at > NOW() - INTERVAL '30 days'
+ORDER BY p.created_at DESC
+LIMIT 20;
+
+/*
+Key things to look for:
+- "Seq Scan" on large tables = missing index
+- "Rows Removed by Filter" >> "Rows" = poor selectivity
+- "Nested Loop" with many rows = potential N+1
+- "Hash Join" / "Merge Join" = usually efficient
+- Actual time >> Estimated time = stale statistics (run ANALYZE)
+- "Buffers: hit=X read=Y" — hit = from RAM (fast), read = from disk (slow)
+*/
+```
+
+---
+
+## Replication & High Availability
+
+Running a single database is a single point of failure. Replication adds redundancy.
+
+```mermaid
+graph TB
+    subgraph Primary["📝 Primary (Read/Write)"]
+        P[(PostgreSQL Primary)]
+        WAL[Write-Ahead Log]
+        P --> WAL
+    end
+
+    subgraph Replicas["📖 Read Replicas (Read Only)"]
+        R1[(Replica 1 - US-East)]
+        R2[(Replica 2 - EU-West)]
+        R3[(Replica 3 - AP-Southeast)]
+    end
+
+    subgraph App["Application"]
+        WRITE[Write Operations\nINSERT UPDATE DELETE]
+        READ[Read Operations\nSELECT heavy queries]
+    end
+
+    WAL -->|Streaming replication| R1
+    WAL -->|Streaming replication| R2
+    WAL -->|Streaming replication| R3
+
+    WRITE --> P
+    READ -->|Load balanced| R1 & R2 & R3
+
+    style Primary fill:#fee2e2
+    style Replicas fill:#dcfce7
+    style App fill:#dbeafe
+```
+
+### Replication Modes
+
+```
+Synchronous replication:
+- Primary waits for at least one replica to confirm write
+- Zero data loss on failover
+- Higher write latency (+5-20ms per commit)
+- Use for: financial data, critical user data
+
+Asynchronous replication:
+- Primary doesn't wait for replicas
+- Tiny risk of data loss on primary failure (seconds of lag)
+- Fastest write performance
+- Use for: most applications, where tiny lag is acceptable
+
+PostgreSQL configuration:
+synchronous_standby_names = 'replica1'  -- Sync to at least one
+synchronous_commit = on  -- Default synchronous
+synchronous_commit = local  -- Only wait for local WAL write (faster, less safe)
+```
+
+### Automatic Failover
+
+```yaml
+# Patroni — production PostgreSQL HA solution
+# Uses etcd/Consul/ZooKeeper as distributed consensus
+scope: postgres-cluster
+name: node1
+
+restapi:
+  listen: 0.0.0.0:8008
+  connect_address: 10.0.0.1:8008
+
+etcd:
+  hosts: etcd1:2379,etcd2:2379,etcd3:2379
+
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 30
+    maximum_lag_on_failover: 1048576  # 1MB — don't promote stale replica
+
+postgresql:
+  listen: 0.0.0.0:5432
+  connect_address: 10.0.0.1:5432
+  pg_hba:
+    - host replication replicator 0.0.0.0/0 md5
+```
+
+---
+
+## Sharding & Horizontal Scaling
+
+When a single PostgreSQL primary isn't enough (>10TB data, >100K writes/sec), you need to partition data across multiple servers.
+
+```mermaid
+graph TB
+    APP[Application] --> ROUTER[Shard Router]
+
+    subgraph Shard0["Shard 0 (users A-F)"]
+        DB0[(Database 0)]
+    end
+
+    subgraph Shard1["Shard 1 (users G-M)"]
+        DB1[(Database 1)]
+    end
+
+    subgraph Shard2["Shard 2 (users N-S)"]
+        DB2[(Database 2)]
+    end
+
+    subgraph Shard3["Shard 3 (users T-Z)"]
+        DB3[(Database 3)]
+    end
+
+    ROUTER -->|hash(user_id) % 4 == 0| DB0
+    ROUTER -->|hash(user_id) % 4 == 1| DB1
+    ROUTER -->|hash(user_id) % 4 == 2| DB2
+    ROUTER -->|hash(user_id) % 4 == 3| DB3
+```
+
+**Sharding strategies:**
+
+```
+Range sharding:
+  Shard 0: users where id < 1,000,000
+  Shard 1: users where id 1,000,000 - 2,000,000
+  Pros: Range queries efficient
+  Cons: Hot spots if new users concentrate in one shard
+
+Hash sharding:
+  shard_id = hash(user_id) % num_shards
+  Pros: Even distribution
+  Cons: Range queries require scatter-gather
+
+Directory sharding:
+  Lookup service maps user_id → shard_id
+  Pros: Flexible, can rebalance
+  Cons: Extra hop, lookup service is a bottleneck/SPOF
+```
+
+**PostgreSQL partitioning (same machine, logical separation):**
+
+```sql
+-- Time-based partitioning for events/logs
+CREATE TABLE events (
+  id         BIGSERIAL,
+  user_id    UUID NOT NULL,
+  event_type VARCHAR(100) NOT NULL,
+  data       JSONB,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+) PARTITION BY RANGE (created_at);
+
+-- Create monthly partitions
+CREATE TABLE events_2024_01 PARTITION OF events
+  FOR VALUES FROM ('2024-01-01') TO ('2024-02-01');
+
+CREATE TABLE events_2024_02 PARTITION OF events
+  FOR VALUES FROM ('2024-02-01') TO ('2024-03-01');
+
+-- Old partitions can be archived/dropped cheaply
+DROP TABLE events_2023_01;  -- Instant — no rewrite needed
+```
+
+---
+
+## Object Storage
+
+Files, images, videos, documents — these should NEVER be stored in the database.
+
+```mermaid
+graph LR
+    APP[Backend API] --> S3[AWS S3 / GCS / R2]
+    APP -->|Presigned URL| FRONTEND[Frontend]
+    FRONTEND -->|Direct upload| S3
+    S3 --> CDN[CloudFront CDN]
+    CDN --> USER[User Browser]
+
+    style S3 fill:#fef9c3
+    style CDN fill:#dcfce7
+```
+
+```typescript
+import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3'
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
+
+const s3 = new S3Client({ region: process.env.AWS_REGION })
+
+// Generate presigned upload URL — frontend uploads directly to S3
+// Backend never receives the file bytes (scales infinitely)
+export async function generateUploadUrl(
+  userId: string,
+  fileName: string,
+  contentType: string
+): Promise<{ uploadUrl: string; key: string }> {
+  const key = `uploads/${userId}/${Date.now()}-${sanitizeFilename(fileName)}`
+
+  const command = new PutObjectCommand({
+    Bucket: process.env.S3_BUCKET,
+    Key: key,
+    ContentType: contentType,
+    ContentLength: MAX_FILE_SIZE,
+    // Only allow this exact user to upload to this key
+    Metadata: { uploaded_by: userId },
+  })
+
+  const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 300 }) // 5 minutes
+  return { uploadUrl, key }
+}
+
+// Generate presigned download URL for private files
+export async function generateDownloadUrl(key: string): Promise<string> {
+  const command = new GetObjectCommand({
+    Bucket: process.env.S3_BUCKET,
+    Key: key,
+  })
+  return getSignedUrl(s3, command, { expiresIn: 3600 }) // 1 hour
+}
+```
+
+---
+
+## Backups & Point-in-Time Recovery
+
+### Backup Strategy
+
+```
+Backup types:
+┌─────────────────────────────────────────────────────────────────┐
+│  Full Backup                                                     │
+│  - Complete snapshot of entire database                         │
+│  - Schedule: Daily (off-peak hours)                             │
+│  - Storage: ~100% of database size                              │
+│  - Restore: Slowest (restore full backup)                       │
+└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│  Incremental Backup                                             │
+│  - Only changes since last backup                               │
+│  - Schedule: Every 1-6 hours                                    │
+│  - Storage: Small (only changes)                                │
+│  - Restore: Full + all incrementals                             │
+└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│  WAL Archiving (Point-in-Time Recovery)                         │
+│  - Continuous stream of changes                                 │
+│  - Restore to any second in the past                            │
+│  - Essential for: finance, healthcare, critical data            │
+│  - Used by: all serious PostgreSQL production deployments       │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+```bash
+# PostgreSQL PITR (Point-in-Time Recovery) with pgBackRest
+# Configure WAL archiving
+archive_mode = on
+archive_command = 'pgbackrest --stanza=db archive-push %p'
+
+# Take full backup
+pgbackrest --stanza=db --type=full backup
+
+# Restore to specific point in time
+pgbackrest --stanza=db --type=time \
+  --target="2024-01-15 14:30:00 UTC" \
+  --target-action=promote \
+  restore
+```
+
+### The 3-2-1 Backup Rule
+
+```
+3 copies of data
+2 different storage media/formats
+1 copy offsite (different region/cloud)
+
+Example for production:
+Copy 1: Live database (primary)
+Copy 2: Read replica (different AZ)
+Copy 3: Daily S3 backup (different region)
+```
+
+---
+
+## Common Technologies
+
+| Database | Type | Best For | Managed Options |
+|----------|------|----------|----------------|
+| **PostgreSQL** | Relational | Most use cases, ACID | AWS RDS, Supabase, Neon |
+| **MySQL** | Relational | Web apps, WordPress | AWS RDS, PlanetScale |
+| **SQLite** | Relational | Embedded, dev, small apps | Turso (distributed) |
+| **MongoDB** | Document | Flexible schema, catalog | MongoDB Atlas |
+| **Redis** | Key-Value/Cache | Sessions, cache, queues | Upstash, Redis Cloud |
+| **Cassandra** | Wide-Column | High write throughput | AWS Keyspaces, Astra |
+| **Elasticsearch** | Search | Full-text search, logs | Elastic Cloud, AWS OpenSearch |
+| **InfluxDB** | Time-Series | Metrics, IoT, monitoring | InfluxDB Cloud |
+| **Neo4j** | Graph | Social graphs, recommendations | Neo4j AuraDB |
+| **DynamoDB** | Key-Value | Serverless, AWS-native | AWS DynamoDB |
+
+---
+
+## Real-World Example: How Stripe Stores Payment Data
+
+Stripe is the gold standard for financial data architecture.
+
+```
+Data Model (simplified):
+
+customers
+├── id: cus_xxx
+├── email
+└── created_at
+
+payment_methods
+├── id: pm_xxx
+├── customer_id → customers
+├── type: card | bank_account
+├── last4: 4242 (never stores full card number)
+└── card_fingerprint (encrypted, for deduplication)
+
+charges
+├── id: ch_xxx
+├── customer_id → customers
+├── payment_method_id → payment_methods
+├── amount: 2000 (in cents, always integers — never floats)
+├── currency: usd
+├── status: pending | succeeded | failed | refunded
+└── created_at
+
+charge_events (event log — append-only, never updated)
+├── id
+├── charge_id → charges
+├── type: charge.created | charge.succeeded | charge.failed
+├── data: JSONB
+└── created_at
+```
+
+**Why Stripe uses append-only event logs:**
+- You can never "lose" a state transition — every change is recorded
+- Can replay events to reconstruct current state
+- Audit trail required for financial compliance (SOX, PCI DSS)
+- Event-driven architecture — other services listen to events
+
+---
+
+## Architecture Diagram
+
+```mermaid
+graph TB
+    subgraph Application["Application Layer"]
+        API[API Servers]
+        WORKER[Background Workers]
+    end
+
+    subgraph Primary_DB["Primary Database Cluster"]
+        PG_PRIMARY[(PostgreSQL Primary\nRead/Write)]
+        PG_REPLICA1[(Read Replica 1\nRead Only)]
+        PG_REPLICA2[(Read Replica 2\nRead Only)]
+        PG_PRIMARY -->|WAL streaming| PG_REPLICA1
+        PG_PRIMARY -->|WAL streaming| PG_REPLICA2
+    end
+
+    subgraph Cache_Layer["Cache Layer"]
+        REDIS_CLUSTER[(Redis Cluster\nSessions · Cache · Queues)]
+    end
+
+    subgraph Search["Search Layer"]
+        ES[(Elasticsearch\nFull-Text Search)]
+    end
+
+    subgraph Storage["Object Storage"]
+        S3[(AWS S3\nFiles · Images · Videos)]
+        CDN[CloudFront CDN]
+        S3 --> CDN
+    end
+
+    subgraph Backup["Backup & Recovery"]
+        WAL[WAL Archive\nS3 - Different Region]
+        SNAPSHOT[Daily Snapshots]
+    end
+
+    API -->|Writes| PG_PRIMARY
+    API -->|Reads| PG_REPLICA1 & PG_REPLICA2
+    WORKER -->|Writes| PG_PRIMARY
+    API <--> REDIS_CLUSTER
+    API --> ES
+    API --> S3
+
+    PG_PRIMARY --> WAL
+    PG_PRIMARY --> SNAPSHOT
+
+    style Primary_DB fill:#fee2e2
+    style Cache_Layer fill:#fef9c3
+    style Search fill:#dcfce7
+    style Storage fill:#dbeafe
+    style Backup fill:#f3e8ff
+```
+
+---
+
+## Common Mistakes
+
+### 1. Using FLOAT for Money
+```sql
+-- ❌ Floating point precision errors
+SELECT 0.1 + 0.2;  -- Returns 0.30000000000000004
+
+-- ✅ Always use DECIMAL/NUMERIC for money
+CREATE TABLE charges (
+  amount  DECIMAL(19, 4) NOT NULL,  -- Exact decimal arithmetic
+  -- OR store as integer cents
+  amount_cents INTEGER NOT NULL     -- 2000 = $20.00
+);
+```
+
+### 2. No Database Migrations
+```bash
+# ❌ Editing production schema directly (DROP COLUMN, ALTER TABLE)
+# — data loss, no rollback, no team visibility
+
+# ✅ Version-controlled migrations
+# Prisma migrations
+npx prisma migrate dev --name add_user_roles
+
+# Knex migrations
+exports.up = (knex) => knex.schema.table('users', t => t.string('role'))
+exports.down = (knex) => knex.schema.table('users', t => t.dropColumn('role'))
+```
+
+### 3. Missing Indexes on Foreign Keys
+```sql
+-- ❌ Table scan on every post lookup by user
+-- posts.user_id references users.id but has no index
+SELECT * FROM posts WHERE user_id = '123';
+-- Full table scan = O(N)
+
+-- ✅ Always index foreign keys
+CREATE INDEX idx_posts_user_id ON posts(user_id);
+-- Also index frequently filtered columns
+CREATE INDEX idx_posts_published_at ON posts(published_at DESC)
+  WHERE published = TRUE;
+```
+
+### 4. N+1 Queries in ORM
+```typescript
+// ❌ N+1: 1 query for posts + 1 query per post for author
+const posts = await Post.findAll({ limit: 20 })
+for (const post of posts) {
+  post.author = await User.findByPk(post.authorId)  // 20 queries!
+}
+
+// ✅ Eager loading — single JOIN query
+const posts = await Post.findAll({
+  limit: 20,
+  include: [{ model: User, as: 'author' }]  // 1 query
+})
+```
+
+---
+
+## Best Practices
+
+1. **Use UUIDs or ULIDs for primary keys** — Prevents enumeration attacks, works across shards.
+2. **always_use_UTC** — Store timestamps in UTC, convert to local time in the application layer.
+3. **Soft deletes where appropriate** — Add `deleted_at TIMESTAMPTZ` instead of `DELETE`. Allows recovery, preserves audit history.
+4. **Run migrations in transactions** — If a migration fails halfway, roll back completely.
+5. **Connection pooling** — Use PgBouncer or built-in pooling. Databases have connection limits.
+6. **Read/write separation** — Route SELECT queries to replicas, writes to primary.
+7. **Monitor slow queries** — `log_min_duration_statement = 100ms` in PostgreSQL logs all queries over 100ms.
+
+---
+
+## Interview-Level Insights
+
+### Q: Explain CAP Theorem and when it applies.
+
+**A:** CAP Theorem states that a distributed data system can provide at most two of: **Consistency** (all nodes see the same data), **Availability** (every request gets a response), and **Partition Tolerance** (system works despite network partitions).
+
+Network partitions (splits) are unavoidable in distributed systems. So the real choice is CP (consistent but possibly unavailable during partitions — PostgreSQL cluster behavior) vs AP (available but possibly stale — DynamoDB's default).
+
+PostgreSQL is CP: during a primary failure before failover completes, writes are unavailable. Cassandra is AP: always available, but reads may return stale data. Choose based on your consistency requirements.
+
+---
+
+### Q: What is a database deadlock and how do you prevent it?
+
+**A:** A deadlock occurs when two transactions each hold a lock that the other needs.
+
+```
+Transaction A: LOCK row 1, then try to LOCK row 2
+Transaction B: LOCK row 2, then try to LOCK row 1
+→ Both wait forever = deadlock
+```
+
+Prevention strategies:
+1. Always acquire locks in the same order across all transactions
+2. Keep transactions short (less time holding locks)
+3. Use `SELECT FOR UPDATE SKIP LOCKED` for queue-like patterns
+4. PostgreSQL detects deadlocks automatically (within `deadlock_timeout`) and aborts one transaction — design for retries
+
+---
+
+## Advanced Production Concepts
+
+### Logical Replication for Zero-Downtime Migrations
+
+Large schema changes (adding a column to a 500M row table) would lock the table for hours with `ALTER TABLE`. The solution:
+
+```sql
+-- Step 1: Add column without constraint (instant)
+ALTER TABLE users ADD COLUMN new_field VARCHAR(200);
+
+-- Step 2: Backfill in batches (no lock)
+UPDATE users SET new_field = compute_value(old_field)
+WHERE id IN (
+  SELECT id FROM users WHERE new_field IS NULL LIMIT 10000
+);
+-- Run this in a loop until all rows are updated
+
+-- Step 3: Add NOT NULL constraint after backfill (instant with default)
+ALTER TABLE users ALTER COLUMN new_field SET NOT NULL;
+```
+
+### Connection Pooling at Scale
+
+```
+Without connection pooling:
+  1000 concurrent API requests → 1000 PostgreSQL connections
+  PostgreSQL max_connections = 500 → 500 connections refused
+
+With PgBouncer (transaction pooling):
+  1000 concurrent API requests → PgBouncer pool of 50 connections
+  PostgreSQL only sees 50 connections — happy!
+  
+PgBouncer transaction mode: connections returned to pool after each transaction
+PgBouncer session mode: connection held for full session (not as efficient)
+```
+
+---
+
+## Summary
+
+The database layer is where correctness lives. The key principles:
+
+1. **Choose the right tool** — PostgreSQL for most things, Redis for cache/queues, S3 for files
+2. **ACID transactions** — Never do multi-step operations without transactions
+3. **Index strategically** — Every foreign key, every filter column, every sort column
+4. **Plan for scale** — Read replicas first, partitioning second, sharding as last resort
+5. **Backup religiously** — Test your restores — a backup you haven't tested is not a backup
+
+---
+
+## Production Checklist
+
+- [ ] UUID primary keys
+- [ ] All timestamps stored in UTC
+- [ ] Foreign keys indexed
+- [ ] Frequently filtered columns indexed
+- [ ] Migrations version-controlled and tested
+- [ ] Connection pooling configured (PgBouncer)
+- [ ] Read replicas for query offloading
+- [ ] Automated daily backups with retention policy
+- [ ] Backup restore tested quarterly
+- [ ] PITR (WAL archiving) enabled for critical data
+- [ ] `pg_stat_statements` enabled for slow query monitoring
+- [ ] `log_min_duration_statement = 200ms` configured
+- [ ] Object storage (S3) for files — never in DB
+- [ ] Presigned URLs for private file access
+- [ ] Money stored as DECIMAL or integer cents (never FLOAT)
+
+---
+
+*Previous: [Layer 2: Backend →](../02-backend/README.md) | Next: [Layer 4: Auth & Permissions →](../04-auth/README.md)*

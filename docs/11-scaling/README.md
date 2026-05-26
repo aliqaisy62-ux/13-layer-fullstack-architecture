@@ -1,0 +1,677 @@
+# Layer 11: Load Balancing & Scaling
+## Handling Traffic From One User to One Billion
+
+> **Layer role:** Load balancing distributes incoming traffic across multiple servers. Scaling is the practice of adding (or removing) resources to match demand. Together they ensure your application can handle growth — from a single user testing locally to millions of concurrent users in production.
+
+---
+
+## Table of Contents
+
+1. [Beginner Explanation](#beginner-explanation)
+2. [Horizontal vs Vertical Scaling](#horizontal-vs-vertical-scaling)
+3. [Load Balancing Algorithms](#load-balancing-algorithms)
+4. [Layer 4 vs Layer 7 Load Balancing](#layer-4-vs-layer-7-load-balancing)
+5. [Health Checks](#health-checks)
+6. [Stateless Architecture](#stateless-architecture)
+7. [Autoscaling](#autoscaling)
+8. [Database Scaling](#database-scaling)
+9. [Distributed Systems Fundamentals](#distributed-systems-fundamentals)
+10. [Architecture Diagram](#architecture-diagram)
+11. [Common Mistakes](#common-mistakes)
+12. [Best Practices](#best-practices)
+13. [Interview-Level Insights](#interview-level-insights)
+14. [Summary](#summary)
+15. [Production Checklist](#production-checklist)
+
+---
+
+## Beginner Explanation
+
+A supermarket with one checkout lane works fine for 10 customers. At 1,000 customers, everyone waits 2 hours. Solution: open more checkout lanes.
+
+Load balancing is the manager who directs customers to available lanes. "Lane 3 is free, go there." When a lane breaks down, the manager stops sending customers to it (health check). When it's Black Friday, the store opens temporary express lanes (autoscaling).
+
+Scaling is about being able to open more lanes. Vertical scaling = making one lane faster (bigger register). Horizontal scaling = opening more lanes in parallel.
+
+---
+
+## Horizontal vs Vertical Scaling
+
+```mermaid
+graph LR
+    subgraph Vertical["⬆️ Vertical Scaling (Scale Up)"]
+        S1[Server: 4 vCPU 8GB]
+        S2[Server: 16 vCPU 64GB]
+        S3[Server: 64 vCPU 512GB]
+        S1 -->|Upgrade| S2 -->|Upgrade| S3
+    end
+
+    subgraph Horizontal["⬅️➡️ Horizontal Scaling (Scale Out)"]
+        LB[Load Balancer]
+        A1[Server 1: 4 vCPU]
+        A2[Server 2: 4 vCPU]
+        A3[Server 3: 4 vCPU]
+        A4[Server 4: 4 vCPU]
+        LB --> A1 & A2 & A3 & A4
+    end
+```
+
+| Dimension | Vertical | Horizontal |
+|-----------|----------|-----------|
+| **Limit** | Hardware ceiling (biggest EC2 type) | Theoretically unlimited |
+| **Cost** | Expensive per unit | Cheaper per unit |
+| **Downtime** | Requires restart | Rolling update, no downtime |
+| **Complexity** | Simple | Requires stateless design, LB |
+| **Single point of failure** | Yes | No (multiple servers) |
+| **Use case** | Databases (initially) | APIs, workers, any stateless service |
+| **Example** | db.r7g.2xlarge → db.r7g.8xlarge | 2 API servers → 20 API servers |
+
+> **Rule of thumb:** Scale vertically first (simpler). When you hit the ceiling or need HA, scale horizontally.
+
+---
+
+## Load Balancing Algorithms
+
+### Round Robin
+
+```
+Requests: 1, 2, 3, 4, 5, 6
+Server 1: 1, 4
+Server 2: 2, 5
+Server 3: 3, 6
+
+Simple, equal distribution.
+Problem: doesn't account for server capacity or current load.
+```
+
+### Weighted Round Robin
+
+```
+Server 1: weight=3 (8 vCPU)
+Server 2: weight=2 (4 vCPU)
+Server 3: weight=1 (2 vCPU)
+
+Distribution: S1 gets 50%, S2 gets 33%, S3 gets 17%
+Use when: servers have different capacities
+```
+
+### Least Connections
+
+```
+Current state:
+Server 1: 150 active connections
+Server 2: 43 active connections  ← New request goes here
+Server 3: 87 active connections
+
+Best for: long-running connections (WebSockets, video streaming)
+Prevents: overloading one server with slow connections
+```
+
+### IP Hash (Sticky Sessions)
+
+```
+hash(client_ip) % num_servers → always same server
+
+Server 1: all requests from 10.0.0.x
+Server 2: all requests from 10.0.1.x
+Server 3: all requests from 10.0.2.x
+
+Use when: server-side session (avoid this with stateless design!)
+Problem: hot spots if many users share one IP (corporate NAT)
+```
+
+### Least Response Time
+
+```
+Server 1: avg 120ms response
+Server 2: avg 43ms response  ← New requests go here
+Server 3: avg 67ms response
+
+Best for: heterogeneous servers or variable-cost operations
+Requires: latency tracking overhead
+```
+
+---
+
+## Layer 4 vs Layer 7 Load Balancing
+
+```mermaid
+graph TB
+    subgraph L4["Layer 4 (Transport) Load Balancer"]
+        L4_LB[Load Balancer]
+        TCP1[Server 1]
+        TCP2[Server 2]
+        TCP3[Server 3]
+        L4_LB -->|Forward TCP packets| TCP1 & TCP2 & TCP3
+        NOTE_L4[Doesn't see HTTP content\nFastest - pure TCP forwarding\nExamples: AWS NLB, HAProxy TCP mode]
+    end
+
+    subgraph L7["Layer 7 (Application) Load Balancer"]
+        L7_LB[Load Balancer]
+        L7_LB -->|/api/* → API servers| API1[API Server 1]
+        L7_LB -->|/api/* → API servers| API2[API Server 2]
+        L7_LB -->|/ws/* → WebSocket servers| WS1[WS Server 1]
+        L7_LB -->|/static/* → CDN| CDN1[CDN]
+        NOTE_L7[Reads HTTP headers, paths, cookies\nSmarter routing, SSL termination\nExamples: AWS ALB, NGINX, Cloudflare]
+    end
+```
+
+### NGINX as Layer 7 Load Balancer
+
+```nginx
+upstream api_servers {
+    # Upstream group
+    server api1.internal:3000 weight=3;
+    server api2.internal:3000 weight=3;
+    server api3.internal:3000 weight=2;
+    server api4.internal:3000 backup;      # Failover only
+
+    keepalive 32;  # Keep 32 idle connections to upstreams (performance)
+}
+
+upstream websocket_servers {
+    ip_hash;  # Sticky sessions for WebSocket
+    server ws1.internal:3001;
+    server ws2.internal:3001;
+}
+
+server {
+    listen 443 ssl http2;
+
+    # Route based on path
+    location /api/ {
+        proxy_pass http://api_servers;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+        # Timeout configuration
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+    }
+
+    location /ws/ {
+        proxy_pass http://websocket_servers;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3600s;  # Long timeout for WebSocket
+    }
+}
+```
+
+---
+
+## Health Checks
+
+The load balancer must know which servers are healthy. Unhealthy servers are removed from rotation automatically.
+
+```mermaid
+sequenceDiagram
+    participant LB as ⚖️ Load Balancer
+    participant S1 as Server 1 (Healthy)
+    participant S2 as Server 2 (Failing)
+    participant S3 as Server 3 (Healthy)
+
+    loop Every 10 seconds
+        LB->>S1: GET /health
+        S1-->>LB: 200 OK
+        LB->>S2: GET /health
+        S2-->>LB: 503 (DB connection failed)
+        LB->>S3: GET /health
+        S3-->>LB: 200 OK
+    end
+
+    Note over LB,S2: After 3 consecutive failures
+    LB->>LB: Remove S2 from pool
+    LB->>S1: Route 50% of traffic
+    LB->>S3: Route 50% of traffic
+
+    Note over S2: Server recovered
+    LB->>S2: GET /health → 200 OK (3 consecutive)
+    LB->>LB: Re-add S2 to pool
+```
+
+```typescript
+// Comprehensive health check endpoint
+app.get('/health', async (req, res) => {
+  const startTime = Date.now()
+
+  const checks = await Promise.allSettled([
+    // Check DB connectivity and query latency
+    db.query('SELECT 1').then(() => ({ name: 'database', status: 'ok' })),
+
+    // Check Redis connectivity
+    redis.ping().then(() => ({ name: 'redis', status: 'ok' })),
+
+    // Check external API dependencies
+    fetch(`${process.env.PAYMENT_API_URL}/health`, { signal: AbortSignal.timeout(2000) })
+      .then(r => r.ok ? { name: 'payment_api', status: 'ok' } : Promise.reject())
+      .catch(() => ({ name: 'payment_api', status: 'degraded' })),
+  ])
+
+  const results = checks.map((c, i) => {
+    const names = ['database', 'redis', 'payment_api']
+    return c.status === 'fulfilled'
+      ? c.value
+      : { name: names[i], status: 'error', error: c.reason?.message }
+  })
+
+  const critical = results.filter(r => ['database', 'redis'].includes(r.name))
+  const healthy = critical.every(r => r.status === 'ok')
+
+  res.status(healthy ? 200 : 503).json({
+    status: healthy ? 'healthy' : 'unhealthy',
+    version: process.env.APP_VERSION,
+    uptime: process.uptime(),
+    responseTime: Date.now() - startTime,
+    checks: results,
+  })
+})
+```
+
+---
+
+## Stateless Architecture
+
+**This is the prerequisite for horizontal scaling.** If server-side state varies between instances, load balancing breaks.
+
+```mermaid
+graph TB
+    subgraph Stateful["❌ Stateful (Can't Scale)"]
+        LB_BAD[Load Balancer]
+        SRV1_BAD[Server 1\nSession: Alice logged in]
+        SRV2_BAD[Server 2\nNo session for Alice]
+        LB_BAD -->|Alice's 1st request| SRV1_BAD
+        LB_BAD -->|Alice's 2nd request| SRV2_BAD
+        NOTE[Server 2 says: who is Alice?\n→ Logged out!]
+    end
+
+    subgraph Stateless["✅ Stateless (Scales Perfectly)"]
+        LB_GOOD[Load Balancer]
+        SRV1_GOOD[Server 1\nStateless]
+        SRV2_GOOD[Server 2\nStateless]
+        REDIS_GOOD[(Redis\nSession store)]
+        LB_GOOD -->|Any request| SRV1_GOOD & SRV2_GOOD
+        SRV1_GOOD & SRV2_GOOD -->|Fetch session| REDIS_GOOD
+        NOTE2[Both servers read same\nsession from Redis → works!]
+    end
+```
+
+**Making your app stateless:**
+```typescript
+// ❌ In-memory state — breaks with multiple servers
+const sessions: Map<string, User> = new Map()
+app.post('/login', (req, res) => {
+  sessions.set(sessionId, user)  // Only Server 1 knows about this session!
+})
+
+// ✅ External state — shared across all servers
+app.post('/login', async (req, res) => {
+  await redis.setex(`session:${sessionId}`, 86400, JSON.stringify(user))
+  // All servers read from the same Redis → any server handles any request
+})
+
+// ❌ Local file cache — each server has different data
+const imageCache = {}
+async function getImage(key) {
+  if (imageCache[key]) return imageCache[key]
+  // ...
+}
+
+// ✅ Shared Redis cache
+async function getImage(key) {
+  const cached = await redis.getBuffer(key)
+  if (cached) return cached
+  // ...
+}
+```
+
+---
+
+## Autoscaling
+
+```mermaid
+graph TB
+    subgraph Normal["😎 Normal Traffic (3 servers)"]
+        LB1[Load Balancer] --> N1[API 1] & N2[API 2] & N3[API 3]
+        METRICS1[CPU: 45%\nReqs/s: 500]
+    end
+
+    subgraph Spike["🔥 Traffic Spike (scale out)"]
+        LB2[Load Balancer] --> S1[API 1] & S2[API 2] & S3[API 3] & S4[API 4+] & S5[API 5+] & S6[API 6+]
+        METRICS2[CPU: 78% → trigger\nScale out: +3 servers\nReqs/s: 3000]
+    end
+
+    subgraph Scale_In["😴 Traffic Drop (scale in)"]
+        LB3[Load Balancer] --> I1[API 1] & I2[API 2]
+        METRICS3[CPU: 12% → trigger\nScale in: -1 server/5min\nReqs/s: 100]
+    end
+```
+
+### Kubernetes HPA (Horizontal Pod Autoscaler)
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api-hpa
+  namespace: production
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api
+  minReplicas: 3    # Always at least 3 (one per AZ)
+  maxReplicas: 100  # Budget ceiling
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70  # Scale out when avg CPU > 70%
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+    - type: Pods
+      pods:
+        metric:
+          name: requests_per_second  # Custom metric from Prometheus
+        target:
+          type: AverageValue
+          averageValue: "1000"  # Scale out when avg > 1000 req/s per pod
+  behavior:
+    scaleOut:
+      stabilizationWindowSeconds: 0   # Scale out immediately
+      policies:
+        - type: Pods
+          value: 4            # Add max 4 pods at once
+          periodSeconds: 60
+    scaleIn:
+      stabilizationWindowSeconds: 300  # Wait 5 min before scaling in
+      policies:
+        - type: Pods
+          value: 1            # Remove max 1 pod per 5 minutes (conservative)
+          periodSeconds: 300
+```
+
+---
+
+## Database Scaling
+
+Databases are harder to scale than stateless API servers. The strategies in order of complexity:
+
+```
+1. Query Optimization (FREE)
+   Add missing indexes
+   Fix N+1 queries
+   Add covering indexes
+   Rewrite slow queries
+   → Can 10-100x improve without scaling
+
+2. Vertical Scaling (SIMPLE)
+   db.r6g.large → db.r6g.2xlarge → db.r6g.8xlarge
+   More RAM = more data fits in buffer pool = fewer disk reads
+   → Buys significant headroom before horizontal scaling needed
+
+3. Read Replicas (COMMON)
+   Add 1-5 read replicas
+   Route SELECT queries to replicas
+   All writes to primary
+   → Scales read throughput linearly
+
+4. Connection Pooling (ESSENTIAL AT SCALE)
+   PgBouncer between app and database
+   App: 200 servers × 10 connections = 2000 connections
+   PgBouncer: maintains 50 actual DB connections
+   → Database sees 50 connections instead of 2000
+
+5. Partitioning (ADVANCED)
+   Table partitioned by time or range
+   Old partitions archived/dropped cheaply
+   → Manages table size, improves maintenance
+
+6. Sharding (LAST RESORT)
+   Split data across multiple database servers
+   Very complex, hard to query across shards
+   → Only when vertical + replicas aren't enough
+
+7. CQRS + Event Sourcing (SPECIALIZED)
+   Separate read and write databases entirely
+   Read database optimized for queries
+   → Complex but enables extreme read/write independence
+```
+
+---
+
+## Distributed Systems Fundamentals
+
+### The CAP Theorem
+
+```
+You can only guarantee 2 of these 3 in a distributed system:
+
+C - Consistency:    Every read returns the most recent write
+A - Availability:   Every request gets a response (not an error)
+P - Partition Tolerance: System works despite network splits
+
+Networks partition (split) inevitably → P is non-negotiable in practice
+Therefore: you choose between CP or AP
+
+CP (Choose Consistency over Availability):
+  → During partition: return error rather than stale data
+  → Examples: PostgreSQL cluster, ZooKeeper, HBase
+  → Use when: financial data, inventory, anything requiring exactness
+
+AP (Choose Availability over Consistency):
+  → During partition: return best available data (possibly stale)
+  → Examples: Cassandra, DynamoDB (default), CouchDB
+  → Use when: social feeds, views counts, shopping carts
+```
+
+### Eventual Consistency
+
+```typescript
+// AP system example: product view counter
+// Every node accepts writes without coordination
+// Counters merge eventually (CRDT — Conflict-free Replicated Data Type)
+
+// At any moment, different nodes may show different counts:
+// Node 1: 1,000 views
+// Node 2: 987 views (slightly behind)
+// Node 3: 1,003 views (received some updates before others)
+
+// Eventually (milliseconds to seconds) they converge:
+// All nodes: 1,003 views
+
+// This is acceptable for:
+// - View counts (exact number doesn't matter)
+// - "Online users" counters
+// - Trending topics
+
+// NOT acceptable for:
+// - Account balances (strong consistency required)
+// - Inventory (can't sell more than you have)
+// - Unique constraints (duplicate prevention)
+```
+
+---
+
+## Architecture Diagram
+
+```mermaid
+graph TB
+    subgraph Internet
+        USERS[👤 Millions of Users]
+    end
+
+    subgraph Edge["🌐 CDN + DDoS (Cloudflare)"]
+        CF[Cloudflare\nGlobal anycast]
+    end
+
+    subgraph LB_Tier["⚖️ Load Balancer Tier"]
+        ALB[AWS ALB\nL7 Load Balancer\nSSL termination]
+    end
+
+    subgraph App_Tier["⚙️ Application Tier (Auto-scaling)"]
+        subgraph EKS["EKS Cluster"]
+            API1[API Pod 1]
+            API2[API Pod 2]
+            API3[API Pod 3]
+            HPA[HPA: 3-100 pods\nbased on CPU/req/s]
+        end
+    end
+
+    subgraph Cache_Tier["⚡ Cache Tier"]
+        REDIS_PRIMARY[(Redis Primary)]
+        REDIS_REPLICA[(Redis Replica)]
+        REDIS_PRIMARY -->|Replica| REDIS_REPLICA
+    end
+
+    subgraph DB_Tier["🗄️ Database Tier"]
+        PG_PRIMARY[(PostgreSQL Primary\nr7g.8xlarge)]
+        PG_R1[(Read Replica 1)]
+        PG_R2[(Read Replica 2)]
+        PG_PRIMARY -->|WAL| PG_R1 & PG_R2
+    end
+
+    USERS --> CF --> ALB
+    ALB --> API1 & API2 & API3
+    HPA -->|Scale| EKS
+    API1 & API2 & API3 <-->|Read/Write| REDIS_PRIMARY
+    API1 & API2 & API3 -->|Writes| PG_PRIMARY
+    API1 & API2 & API3 -->|Reads| PG_R1 & PG_R2
+
+    style Internet fill:#f3f4f6
+    style Edge fill:#dcfce7
+    style LB_Tier fill:#dbeafe
+    style App_Tier fill:#fef9c3
+    style Cache_Tier fill:#f3e8ff
+    style DB_Tier fill:#fce7f3
+```
+
+---
+
+## Common Mistakes
+
+### 1. Stateful Servers Preventing Scaling
+```typescript
+// ❌ In-memory cache prevents adding servers
+const cache = new Map()  // Each server has different data!
+
+// ✅ All state in external stores (Redis, DB)
+const cache = redisClient  // Shared across all servers
+```
+
+### 2. Not Draining Connections Before Shutdown
+```typescript
+// ❌ Abrupt shutdown: in-flight requests fail, users see errors
+process.on('SIGTERM', () => process.exit())
+
+// ✅ Graceful shutdown: stop accepting new, finish existing
+process.on('SIGTERM', async () => {
+  console.log('SIGTERM received, shutting down gracefully')
+
+  // Stop accepting new connections
+  server.close(() => {
+    console.log('HTTP server closed')
+  })
+
+  // Wait for in-flight requests to finish (max 30s)
+  const deadline = Date.now() + 30_000
+  while (activeRequests > 0 && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
+
+  // Close DB and Redis connections
+  await db.$disconnect()
+  await redis.quit()
+
+  process.exit(0)
+})
+```
+
+### 3. Scale-In Without Draining
+```yaml
+# ❌ Kubernetes terminates pod immediately — requests fail
+terminationGracePeriodSeconds: 0
+
+# ✅ Allow time for in-flight requests to complete
+terminationGracePeriodSeconds: 30  # Give 30s to drain
+lifecycle:
+  preStop:
+    exec:
+      command: ["/bin/sh", "-c", "sleep 5"]  # Let LB deregister first
+```
+
+---
+
+## Best Practices
+
+1. **Design stateless from day one** — Retrofitting statelessness is painful and expensive.
+2. **Scale conservatively inward, aggressively outward** — Take 5 minutes to scale in, 60 seconds to scale out.
+3. **Load test before you need it** — Know your system's limits before users discover them.
+4. **Horizontal database scaling is the hard part** — Start with query optimization and vertical scaling, exhaust those before sharding.
+5. **Graceful shutdown** — Apps that can't shut down cleanly can't be scaled in safely.
+
+---
+
+## Interview-Level Insights
+
+### Q: How does Netflix handle 250 million concurrent streams without going down?
+
+**A:** Netflix uses several key strategies:
+1. **Multi-region active-active** — Traffic served from 3+ AWS regions simultaneously
+2. **Open Connect CDN** — Netflix-owned CDN embedded in ISPs; most traffic never hits Netflix's origin
+3. **Chaos Engineering** — Chaos Monkey randomly kills production servers to verify systems recover
+4. **Stateless microservices** — Hundreds of independently deployable services, each horizontally scaled
+5. **Circuit breakers** — If recommendation service is down, show popular content instead
+6. **Gradual rollouts** — New code reaches 1% of users first
+
+### Q: Walk me through how you'd scale a social media app from 1K to 100M users.
+
+**A:**
+- **0-1K users:** Single server, single database. Don't over-engineer.
+- **1K-10K:** Add CDN for static assets, add Redis for sessions/cache, separate DB from app server.
+- **10K-100K:** Add read replicas, add load balancer + 2-3 app servers, query optimization.
+- **100K-1M:** Auto-scaling group for app servers, PgBouncer for connection pooling, Redis cluster.
+- **1M-10M:** Database sharding or switch to multi-tenant setup, add Elasticsearch for search, add job queues for async work, add read replicas per region.
+- **10M-100M:** Multi-region deployment, CDN for dynamic content (ISR), dedicated databases per service domain, global load balancing via DNS.
+
+At each stage, the bottleneck changes. Profile first, then scale the bottleneck.
+
+---
+
+## Summary
+
+Scaling is the art of matching infrastructure to demand without waste. Key principles:
+
+1. **Stateless APIs scale horizontally** — No session state on servers
+2. **Databases scale vertically first** — Optimize, then add memory, then add replicas
+3. **Load balancer routes traffic intelligently** — Health checks remove bad servers automatically
+4. **Autoscaling matches capacity to demand** — Scale out fast, scale in slowly
+5. **Graceful shutdown enables safe scale-in** — Always drain before terminating
+
+---
+
+## Production Checklist
+
+- [ ] All API servers are stateless (no local memory state)
+- [ ] Sessions/cache stored in Redis (shared across servers)
+- [ ] Health check endpoint returns 200 only when truly healthy
+- [ ] Graceful shutdown handler (SIGTERM, 30s drain)
+- [ ] Auto-scaling configured with appropriate min/max
+- [ ] Scale-out is fast (0s window), scale-in is slow (300s window)
+- [ ] Database read queries routed to read replicas
+- [ ] Connection pooling (PgBouncer) in front of PostgreSQL
+- [ ] Load testing done for expected peak traffic
+- [ ] Horizontal auto-scaling tested (deploy, watch pods scale)
+
+---
+
+*Previous: [Layer 10: Caching →](../10-caching/README.md) | Next: [Layer 12: Monitoring →](../12-monitoring/README.md)*
