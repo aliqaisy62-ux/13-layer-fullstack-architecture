@@ -1,153 +1,147 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Full Stack Engineering Guide</title>
-<link rel="stylesheet" href="style.css">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Full Stack Architecture LMS</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">13</div>
+        <div>
+          <p class="eyebrow">Interactive Learning Management System</p>
+          <h1>13-Layer Full-Stack Architecture LMS</h1>
+        </div>
+      </div>
 
-<!-- SIDEBAR -->
-<aside class="sidebar" id="sidebar">
-  <div class="sidebar-header">
-    <div class="logo">
-      <span class="logo-icon">⬡</span>
-      <span class="logo-text">FullStack.guide</span>
-    </div>
-    <p class="logo-sub">Engineering Knowledge System</p>
-  </div>
+      <div class="topbar-stats">
+        <div class="stat-card">
+          <span class="stat-label">Completed</span>
+          <strong id="completed-count">0 / 13</strong>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Current Layer</span>
+          <strong id="current-layer-label">Layer 1</strong>
+        </div>
+        <button class="ghost-btn" id="theme-toggle" type="button">Toggle Theme</button>
+      </div>
+    </header>
 
-  <div class="sidebar-search">
-    <div class="search-wrap">
-      <span class="search-icon">⌕</span>
-      <input type="text" id="search-input" placeholder="Search layers..." autocomplete="off" spellcheck="false">
-      <span class="search-hint">⌘K</span>
-    </div>
-    <div class="search-dropdown" id="search-dropdown"></div>
-  </div>
-
-  <div class="filter-row">
-    <button class="filter-tag active" data-filter="all">All</button>
-    <button class="filter-tag" data-filter="beginner">Beginner</button>
-    <button class="filter-tag" data-filter="intermediate">Intermediate</button>
-    <button class="filter-tag" data-filter="advanced">Advanced</button>
-  </div>
-
-  <nav class="sidebar-nav" id="nav"></nav>
-
-  <div class="sidebar-footer">
-    <div class="progress-bar-wrap">
-      <div class="progress-label">
-        <span id="progress-text">0 / 13 visited</span>
-        <span class="progress-pct" id="progress-pct">0%</span>
+    <section class="progress-shell" aria-label="Learning progress">
+      <div class="progress-meta">
+        <span>Layer mastery progress</span>
+        <strong id="progress-text">0% complete</strong>
       </div>
       <div class="progress-track">
-        <div class="progress-fill" id="progress-fill" style="width:0%"></div>
+        <div class="progress-fill" id="progress-fill"></div>
       </div>
-    </div>
-    <div class="footer-actions">
-      <button class="footer-btn" id="theme-btn" title="Toggle theme (T)">◑</button>
-      <button class="footer-btn" id="bookmark-btn" title="Bookmarks (B)">◇</button>
-      <button class="footer-btn" id="shortcuts-btn" title="Shortcuts (?)">⌨</button>
-      <button class="footer-btn" id="expand-btn" title="Expand all (E)">⊞</button>
-    </div>
+    </section>
+
+    <main class="lms-layout">
+      <aside class="docs-pane">
+        <section class="panel intro-panel">
+          <p class="panel-kicker">Documentation</p>
+          <h2>Study the architecture map</h2>
+          <p class="panel-copy">
+            Use the left pane to move through the 13 architectural layers, review the Arabic learning notes, and jump into the challenge attached to each layer.
+          </p>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h3>Learning Layers</h3>
+            <span class="panel-subtitle">Click any layer to load its notes and challenge</span>
+          </div>
+          <div class="layer-list" id="layer-list"></div>
+        </section>
+
+        <section class="panel layer-detail-panel">
+          <div class="panel-header">
+            <h3 id="layer-title">Layer 1</h3>
+            <span class="layer-badge" id="layer-badge">Frontend</span>
+          </div>
+          <p class="layer-summary" id="layer-summary"></p>
+          <div class="layer-grid">
+            <div>
+              <span class="mini-label">Focus</span>
+              <ul class="focus-list" id="layer-focus"></ul>
+            </div>
+            <div>
+              <span class="mini-label">Learning outcome</span>
+              <p id="layer-outcome"></p>
+            </div>
+          </div>
+          <div class="note-box" id="layer-note"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h3>Architecture Checkpoints</h3>
+            <span class="panel-subtitle">Progress is saved locally per challenge</span>
+          </div>
+          <div class="checkpoint-grid" id="checkpoint-grid"></div>
+        </section>
+      </aside>
+
+      <section class="sandbox-pane">
+        <section class="panel challenge-header">
+          <div>
+            <p class="panel-kicker">Coding Sandbox</p>
+            <h2 id="challenge-title">Challenge Title</h2>
+          </div>
+          <div class="challenge-meta">
+            <span class="difficulty-pill" id="difficulty-pill">Easy</span>
+            <span class="type-pill" id="type-pill">Algorithm</span>
+          </div>
+        </section>
+
+        <section class="panel challenge-panel">
+          <div class="panel-header">
+            <h3>Problem Statement</h3>
+            <span class="panel-subtitle">UI instructions are in English, while the challenge text stays in Arabic</span>
+          </div>
+          <p class="problem-statement" id="problem-statement"></p>
+          <div class="hint-box" id="hint-box"></div>
+          <div class="decision-area hidden" id="decision-area">
+            <div class="decision-options" id="decision-options"></div>
+            <button class="primary-btn" id="submit-decision" type="button">Submit Answer</button>
+          </div>
+        </section>
+
+        <section class="panel editor-panel">
+          <div class="panel-header">
+            <h3>Code Editor</h3>
+            <div class="editor-actions">
+              <button class="secondary-btn" id="load-starter" type="button">Load Starter</button>
+              <button class="secondary-btn" id="reset-code" type="button">Reset</button>
+              <button class="primary-btn" id="run-code" type="button">Run Tests</button>
+            </div>
+          </div>
+
+          <div class="editor-shell">
+            <pre class="syntax-layer" id="syntax-layer" aria-hidden="true"></pre>
+            <textarea id="code-editor" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off"></textarea>
+          </div>
+        </section>
+
+        <section class="panel console-panel">
+          <div class="panel-header">
+            <h3>Virtual Console</h3>
+            <button class="ghost-btn" id="clear-console" type="button">Clear</button>
+          </div>
+          <div class="console-output" id="console-output" aria-live="polite"></div>
+        </section>
+      </section>
+    </main>
   </div>
-</aside>
 
-<!-- MOBILE TOP BAR -->
-<div class="mobile-bar">
-  <button class="menu-btn" id="menu-btn" aria-label="Menu">☰</button>
-  <span class="mobile-title" id="mobile-title">Full Stack Guide</span>
-  <span class="mobile-progress" id="mob-prog">1/13</span>
-</div>
-
-<!-- OVERLAY -->
-<div class="overlay" id="overlay"></div>
-
-<!-- BOOKMARKS PANEL -->
-<div class="panel" id="bookmarks-panel">
-  <div class="panel-header">
-    <span class="panel-title">Bookmarks</span>
-    <button class="panel-close" onclick="closePanel('bookmarks-panel')">✕</button>
-  </div>
-  <div class="panel-body" id="bookmarks-list">
-    <p class="panel-empty">No bookmarks yet. Press B to bookmark a layer.</p>
-  </div>
-</div>
-
-<!-- SHORTCUTS PANEL -->
-<div class="panel" id="shortcuts-panel">
-  <div class="panel-header">
-    <span class="panel-title">Keyboard Shortcuts</span>
-    <button class="panel-close" onclick="closePanel('shortcuts-panel')">✕</button>
-  </div>
-  <div class="panel-body">
-    <div class="shortcut-list">
-      <div class="shortcut-item"><kbd>←</kbd><kbd>→</kbd> <span>Navigate layers</span></div>
-      <div class="shortcut-item"><kbd>1</kbd>–<kbd>9</kbd> <span>Jump to layer</span></div>
-      <div class="shortcut-item"><kbd>E</kbd> <span>Expand all sections</span></div>
-      <div class="shortcut-item"><kbd>C</kbd> <span>Collapse all sections</span></div>
-      <div class="shortcut-item"><kbd>B</kbd> <span>Bookmark current</span></div>
-      <div class="shortcut-item"><kbd>T</kbd> <span>Toggle theme</span></div>
-      <div class="shortcut-item"><kbd>?</kbd> <span>Show shortcuts</span></div>
-      <div class="shortcut-item"><kbd>⌘K</kbd> <span>Focus search</span></div>
-      <div class="shortcut-item"><kbd>Esc</kbd> <span>Close panels</span></div>
-    </div>
-  </div>
-</div>
-
-<!-- MAIN -->
-<main class="main" id="main">
-
-  <!-- BREADCRUMB / TOPBAR -->
-  <div class="content-topbar">
-    <div class="breadcrumbs" id="breadcrumbs">
-      <span class="bc-root">Full Stack Guide</span>
-      <span class="bc-sep">›</span>
-      <span class="bc-current" id="bc-current">Frontend</span>
-    </div>
-    <div class="topbar-actions">
-      <button class="topbar-btn" id="bm-current-btn" title="Bookmark this layer">◇ Bookmark</button>
-      <button class="topbar-btn" id="expand-all-btn" title="Expand all">⊞ Expand All</button>
-    </div>
-  </div>
-
-  <div class="content-wrap" id="content"></div>
-
-  <!-- PAGER -->
-  <div class="pager">
-    <button class="pager-btn" id="prev-btn" onclick="navigate(-1)">
-      <span class="pager-arrow">←</span>
-      <div class="pager-btn-inner">
-        <span class="pager-dir">Previous</span>
-        <span class="pager-label" id="prev-label">—</span>
-      </div>
-    </button>
-
-    <div class="pager-center">
-      <div class="pager-dots" id="dots"></div>
-      <span class="pager-num" id="pager-num">1 / 13</span>
-    </div>
-
-    <button class="pager-btn pager-btn-next" id="next-btn" onclick="navigate(1)">
-      <div class="pager-btn-inner">
-        <span class="pager-dir">Next</span>
-        <span class="pager-label" id="next-label">—</span>
-      </div>
-      <span class="pager-arrow">→</span>
-    </button>
-  </div>
-</main>
-
-<!-- TOAST CONTAINER -->
-<div class="toast-container" id="toast-container"></div>
-
-<script src="data.js"></script>
-<script src="app.js"></script>
+  <script src="data.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>
